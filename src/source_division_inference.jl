@@ -1,5 +1,4 @@
 using Base.Threads
-using StaticArrays
 
 import WCS
 import Base.convert, Base.serialize, Base.deserialize
@@ -74,41 +73,41 @@ end
 function serialize(s::Base.AbstractSerializer, psf::PsfComponent)
     Base.serialize_type(s, typeof(psf))
     write(s.io, psf.alphaBar)
-    for p in psf.xiBar
-        write(s.io, p)
-    end
-    for p in psf.tauBar
-        write(s.io, p)
-    end
-    for p in psf.tauBarInv
-        write(s.io, p)
-    end
-    #ser_array(s, psf.xiBar, 2)
-    #ser_array(s, psf.tauBar, 4)
-    #ser_array(s, psf.tauBarInv, 4)
+    #for p in psf.xiBar
+    #    write(s.io, p)
+    #end
+    #for p in psf.tauBar
+    #    write(s.io, p)
+    #end
+    #for p in psf.tauBarInv
+    #    write(s.io, p)
+    #end
+    ser_array(s, psf.xiBar, 2)
+    ser_array(s, psf.tauBar, 4)
+    ser_array(s, psf.tauBarInv, 4)
     write(s.io, psf.tauBarLd)
 end
 
 function deserialize(s::Base.AbstractSerializer, t::Type{PsfComponent})
     alphaBar = read(s.io, Float64)::Float64
-    x = zeros(Float64, 2)
-    for i = 1:length(x)
-        x[i] = read(s.io, Float64)::Float64
-    end
-    xiBar = SVector{2}(x)
-    x = zeros(Float64, 2, 2)
-    for i = 1:length(x)
-        x[i] = read(s.io, Float64)::Float64
-    end
-    tauBar = SMatrix{2,2}(x)
-    x = zeros(Float64, 2, 2)
-    for i = 1:length(x)
-        x[i] = read(s.io, Float64)::Float64
-    end
-    tauBarInv = SMatrix{2,2}(x)
-    #xiBar = deser_array(s, Float64, 2)
-    #tauBar = deser_array(s, Float64, 4)
-    #tauBarInv = deser_array(s, Float64, 4)
+    #x = zeros(Float64, 2)
+    #for i = 1:length(x)
+    #    x[i] = read(s.io, Float64)::Float64
+    #end
+    #xiBar = SVector{2}(x)
+    #x = zeros(Float64, 2, 2)
+    #for i = 1:length(x)
+    #    x[i] = read(s.io, Float64)::Float64
+    #end
+    #tauBar = SMatrix{2,2}(x)
+    #x = zeros(Float64, 2, 2)
+    #for i = 1:length(x)
+    #    x[i] = read(s.io, Float64)::Float64
+    #end
+    #tauBarInv = SMatrix{2,2}(x)
+    xiBar = deser_array(s, Float64, 2)
+    tauBar = deser_array(s, Float64, 4)
+    tauBarInv = deser_array(s, Float64, 4)
     tauBarLd = read(s.io, Float64)::Float64
     PsfComponent(alphaBar, xiBar, tauBar, tauBarInv, tauBarLd)
 end
@@ -193,7 +192,7 @@ function serialize(s::Base.AbstractSerializer, ce::CatalogEntry)
     @assert(oilen <= 19)
     write(s.io, oilen)
     for i in 1:oilen
-        write(s.io, ce.objid[i])
+        write(s.io, ce.objid.data[i])
     end
     for i in oilen+1:19
         write(s.io, zero(UInt8))
@@ -415,7 +414,7 @@ function clean_cache(cache::Dict)
             lru_interval = use_interval
         end 
     end 
-    ntputs(nodeid, threadid(), "discarding $(lru_rcf.run), $(lru_rcf.camcol), $(lru_rcf.field)")
+    #ntputs(nodeid, threadid(), "discarding $(lru_rcf.run), $(lru_rcf.camcol), $(lru_rcf.field)")
     delete!(cache, lru_rcf)
 end
 
@@ -449,8 +448,8 @@ function optimize_source(s::Int64, images::Garray, catalog::Garray,
             n = rcf_to_index[rcf.run, rcf.camcol, rcf.field]
             @assert n > 0
 
-            ntputs(nodeid, tid, "fetching RCF $n",
-                   " ($(rcf.run), $(rcf.camcol), $(rcf.field))")
+            #ntputs(nodeid, tid, "fetching RCF $n",
+            #       " ($(rcf.run), $(rcf.camcol), $(rcf.field))")
 
             tic()
             lock(g_lock)
@@ -539,7 +538,7 @@ function optimize_sources(images::Garray, catalog::Garray, tasks::Garray,
 
     # create Dtree and get the initial allocation
     dt, isparent = Dtree(num_work_items, 0.4,
-                         ceil(Int64, nthreads() / 4))
+                         ceil(Int64, nthreads() / 2))
     numwi, (startwi, endwi) = initwork(dt)
     rundt = runtree(dt)
 
@@ -570,7 +569,7 @@ function optimize_sources(images::Garray, catalog::Garray, tasks::Garray,
                     break
                 end
                 if widx > numwi
-                    ntputs(nodeid, tid, "dtree: getting work")
+                    #ntputs(nodeid, tid, "dtree: getting work")
                     lock(g_lock)
                     numwi, (startwi, endwi) = getwork(dt)
                     unlock(g_lock)
@@ -602,12 +601,12 @@ function optimize_sources(images::Garray, catalog::Garray, tasks::Garray,
                                         stagedir, times)
                     catch exc
                         ntputs(nodeid, tid, "$exc running task $item on try $tries")
-                        if isa(exc, ReadOnlyMemoryError)
-                            est = catch_stacktrace()
-                            for st in est
-                                ntputs(nodeid, tid, "  $st")
-                            end
-                        end
+                        #if isa(exc, ReadOnlyMemoryError)
+                        #    est = catch_stacktrace()
+                        #    for st in est
+                        #        ntputs(nodeid, tid, "  $st")
+                        #    end
+                        #end
                         tries = tries + 1 
                         continue
                     end 
@@ -624,6 +623,8 @@ function optimize_sources(images::Garray, catalog::Garray, tasks::Garray,
             end
         end
     end
+
+    sync()
 
     tic()
     ccall(:jl_threading_run, Void, (Any,), Core.svec(process_tasks))

@@ -1,7 +1,5 @@
 module Model
 
-using StaticArrays
-
 # parameter types
 export Image, TiledImage, ImageTile,
        SkyPatch, PsfComponent,

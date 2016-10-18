@@ -16,7 +16,6 @@ import ..SensitiveFloats
 import Optim
 import WCS
 
-using StaticArrays
 
 include("bivariate_normals.jl")
 
@@ -154,16 +153,16 @@ Note that the point in the image at which the PSF is evaluated --
 that is, the center of the image returned by this function -- is
 already implicit in the value of psf_array.
 """
-function get_psf_at_point(psf_array::Vector{PsfComponent};
-                          rows = -25:25, cols = -25:25)
+function get_psf_at_point(psf_array::Array{PsfComponent, 1};
+                          rows=collect(-25:25), cols=collect(-25:25))
     function get_psf_value(psf::PsfComponent, row::Float64, col::Float64)
-         x = @SVector(Float64[row, col]) - psf.xiBar
-         exp_term = exp(-0.5 * dot(x, psf.tauBarInv * x) - 0.5 * psf.tauBarLd)
-         psf.alphaBar * exp_term / (2 * pi)
+         x = Float64[row, col] - psf.xiBar
+         exp_term = exp(-0.5 * x' * psf.tauBarInv * x - 0.5 * psf.tauBarLd)
+         (psf.alphaBar * exp_term / (2 * pi))[1]
     end
 
-    return Float64[
-     sum(get_psf_value(psf, float(row), float(col)) for psf in psf_array)
+    Float64[
+     sum([ get_psf_value(psf, float(row), float(col)) for psf in psf_array ])
          for row in rows, col in cols ]
 end
 
@@ -402,8 +401,8 @@ Returns:
     - Updates pixel_value in place (and all the other placeholder values as well)
 """
 function evaluate_psf_pixel_fit!{NumType <: Number}(
-        x::SVector{2,Float64}, psf_params::Vector{Vector{NumType}},
-        sigma_vec::Vector{SMatrix{2,2,NumType,4}},
+        x::Vector{Float64}, psf_params::Vector{Vector{NumType}},
+        sigma_vec::Vector{Matrix{NumType}},
         sig_sf_vec::Vector{GalaxySigmaDerivs{NumType}},
         bvn_vec::Vector{BvnComponent{NumType}},
         bvn_derivs::BivariateNormalDerivatives{NumType},
@@ -493,20 +492,20 @@ Convert PSF parameters to covariance matrices and derivatives and BvnComponents.
 """
 function get_sigma_from_params{NumType <: Number}(psf_params::Vector{Vector{NumType}})
     K = length(psf_params)
-    sigma_vec = Array(SMatrix{2,2,NumType,4}, K)
+    sigma_vec = Array(Matrix{NumType}, K)
     sig_sf_vec = Array(GalaxySigmaDerivs{NumType}, K)
     bvn_vec = Array(BvnComponent{NumType}, K)
     for k = 1:K
         sigma_vec[k] = get_bvn_cov(psf_params[k][psf_ids.e_axis],
-            psf_params[k][psf_ids.e_angle],
-            psf_params[k][psf_ids.e_scale])
+                                                                        psf_params[k][psf_ids.e_angle],
+                                                                        psf_params[k][psf_ids.e_scale])
         sig_sf_vec[k] = GalaxySigmaDerivs(
             psf_params[k][psf_ids.e_angle],
             psf_params[k][psf_ids.e_axis],
             psf_params[k][psf_ids.e_scale], sigma_vec[k], calculate_tensor=true)
 
         bvn_vec[k] =
-            BvnComponent{NumType}(SVector{2,NumType}(psf_params[k][psf_ids.mu]), sigma_vec[k], 1.0)
+            BvnComponent{NumType}(psf_params[k][psf_ids.mu], sigma_vec[k], 1.0)
     end
     sigma_vec, sig_sf_vec, bvn_vec
 end
@@ -517,7 +516,7 @@ evaluate_psf_fit but with pre-allocated memory for intermediate calculations.
 """
 function evaluate_psf_fit!{NumType <: Number}(
         psf_params::Vector{Vector{NumType}}, raw_psf::Matrix{Float64},
-        x_mat::Matrix{SVector{2,Float64}},
+        x_mat::Matrix{Vector{Float64}},
         bvn_derivs::BivariateNormalDerivatives{NumType},
         log_pdf::SensitiveFloat{PsfParams, NumType},
         pdf::SensitiveFloat{PsfParams, NumType},
@@ -634,8 +633,8 @@ The locations are chosen so that the scale is pixels, but the center of the
 psf is [0, 0].
 """
 function get_x_matrix_from_psf(psf::Matrix{Float64})
-    psf_center1, psf_center2 = (size(psf, 1) - 1) / 2 + 1, (size(psf, 2) - 1) / 2 + 1
-    return [ @SVector Float64[i - psf_center1, j - psf_center2] for i = 1:size(psf, 1), j = 1:size(psf, 2) ]
+    psf_center = Float64[ (size(psf, i) - 1) / 2 + 1 for i=1:2 ]
+    Vector{Float64}[ Float64[i, j] - psf_center for i=1:size(psf, 1), j=1:size(psf, 2) ]
 end
 
 
@@ -664,7 +663,7 @@ function fit_raw_psf_for_celeste(
     for k=1:K
         mu = psf_params_fit[k][psf_ids.mu]
         weight = psf_params_fit[k][psf_ids.weight]
-        celeste_psf[k] = PsfComponent(weight, SVector{2,eltype(mu)}(mu), SMatrix{2,2,eltype(mu),4}(sigma_vec[k]))
+        celeste_psf[k] = PsfComponent(weight, mu, sigma_vec[k])
     end
 
     celeste_psf, psf_params_fit

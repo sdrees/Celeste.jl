@@ -16,16 +16,11 @@ Attributes:
 """
 immutable PsfComponent
     alphaBar::Float64  # TODO: use underscore
-    xiBar::SVector{2,Float64}
-    tauBar::SMatrix{2,2,Float64,4}
+    xiBar::Vector{Float64}
+    tauBar::Matrix{Float64}
 
-    tauBarInv::SMatrix{2,2,Float64,4}
+    tauBarInv::Matrix{Float64}
     tauBarLd::Float64
-end
-
-function PsfComponent(alphaBar::Float64, xiBar::SVector{2,Float64},
-                      tauBar::SMatrix{2,2,Float64,4})
-    PsfComponent(alphaBar, xiBar, tauBar, inv(tauBar), log(det(tauBar)))
 end
 
 function PsfComponent(alphaBar::Float64, xiBar::Vector{Float64},

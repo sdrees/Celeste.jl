@@ -3,7 +3,6 @@ using Celeste: DeterministicVI, SensitiveFloats
 using Base.Test
 using Distributions
 using DerivativeTestUtils
-using StaticArrays
 
 ######################################
 # Helper functions
@@ -334,7 +333,7 @@ function test_tiny_image_tiling()
   # point with a narrow psf.
 
   blob0 = SampleData.load_stamp_blob(datadir, "164.4311-39.0359_2kpsf");
-  pc = PsfComponent(1/3, zeros(SVector{2,Float64}), 1e-4 * eye(SMatrix{2,2,Float64,4}));
+  pc = PsfComponent(1./3, zeros(2), 1e-4 * eye(2));
   trivial_psf = [pc, pc, pc]
   pixels = ones(100, 1) * 12
   pixels[98:100, 1] = [1e3, 1e4, 1e5]
