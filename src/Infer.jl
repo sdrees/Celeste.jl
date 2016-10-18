@@ -186,7 +186,7 @@ function fit_object_psfs!{NumType <: Number}(
             # Set the starting point at the center's PSF.
             #psf, psf_params = PSF.get_source_psf(
             #    patch.center, ea.images[i], psf_optimizer, central_psf_params)
-            ea.patches[s, i] = SkyPatch(patch, img.psf)
+            ea.patches[s, i] = SkyPatch(patch, ea.images[i].psf)
         end
     end
 end

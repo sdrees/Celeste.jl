@@ -5,11 +5,13 @@ import WCS
 import Base.convert, Base.serialize, Base.deserialize
 
 # Serialized type sizes:
-# - CatalogEntry size is 202 (pos:2, star_fluxes:5, gal_fluxes:5, objid:19)
 # - RawPSF size is 84861 (rrows: 2601x4, cmat: 4x5x5)
 # - PsfComponent size is 130 (xiBar: 2, tauBar:2x2, tauBarInv:2x2)
 # - FlatImage size is 24499147 (pixels: 2048x1489, epsilon_mat: 1489, iota_vec: 2048)
 # - NTuple{5,FlatImage} is 122495737
+
+# - CatalogEntry size is 202 (pos:2, star_fluxes:5, gal_fluxes:5, objid:19)
+
 # InferResult size is 344 (objid: 19, vs: 32)
 
 immutable FlatImage
@@ -177,6 +179,44 @@ function deserialize(s::Base.AbstractSerializer, t::Type{FlatImage})
               field_num, epsilon_mat, iota_vec, raw_psf_comp)
 end
 
+function serialize(s::Base.AbstractSerializer, ce::CatalogEntry)
+    Base.serialize_type(s, typeof(ce))
+    ser_array(s, ce.pos, 2)
+    write(s.io, ce.is_star)
+    ser_array(s, ce.star_fluxes, 5)
+    ser_array(s, ce.gal_fluxes, 5)
+    write(s.io, ce.gal_frac_dev)
+    write(s.io, ce.gal_ab)
+    write(s.io, ce.gal_angle)
+    write(s.io, ce.gal_scale)
+    oilen = length(ce.objid)
+    @assert(oilen <= 19)
+    write(s.io, oilen)
+    for i in 1:oilen
+        write(s.io, ce.objid[i])
+    end
+    for i in oilen+1:19
+        write(s.io, zero(UInt8))
+    end
+    write(s.io, ce.thing_id)
+end
+
+function deserialize(s::Base.AbstractSerializer, t::Type{CatalogEntry})
+    pos = deser_array(s, Float64, 2)
+    is_star = read(s.io, Bool)::Bool
+    star_fluxes = deser_array(s, Float64, 5)
+    gal_fluxes = deser_array(s, Float64, 5)
+    gal_frac_dev = read(s.io, Float64)::Float64
+    gal_ab = read(s.io, Float64)::Float64
+    gal_angle = read(s.io, Float64)::Float64
+    gal_scale = read(s.io, Float64)::Float64
+    oilen = read(s.io, Int)::Int
+    objid = unsafe_wrap(String, pointer(s.io.data, position(s.io)+1), oilen)
+    seek(s.io, position(s.io)+19)
+    thing_id = read(s.io, Int)::Int
+    CatalogEntry(pos, is_star, star_fluxes, gal_fluxes, gal_frac_dev, gal_ab,
+                 gal_angle, gal_scale, objid, thing_id)
+end
 
 function fetch_catalog(rcf, stagedir)
     # note: this call to read_photoobj_files considers only primary detections.
@@ -446,7 +486,7 @@ function optimize_source(s::Int64, images::Garray, catalog::Garray,
             imgs, ih, neighbors, ch, time()
         end
         push!(cache, rcf => (cached_imgs, ih, cached_cat, ch, time()))
-        if length(cache) > 20
+        if length(cache) > 40
             clean_cache(cache)
         end
         unlock(cache_lock)
@@ -464,8 +504,8 @@ function optimize_source(s::Int64, images::Garray, catalog::Garray,
     t0 = time()
     vs_opt = Infer.infer_source(rimages, neighbors, entry)
     runtime = time() - t0
-    rds = @sprintf "%s: %5.3f secs" entry.objid runtime
-    ntputs(nodeid, tid, rds)
+    #rds = @sprintf("%s: %5.3f secs", entry.objid, runtime)
+    ntputs(nodeid, tid, "$(entry.objid): $(trunc(runtime, 3)) secs")
 
     InferResult(entry.thing_id, entry.objid, entry.pos[1], entry.pos[2],
                 vs_opt, runtime)
@@ -560,8 +600,14 @@ function optimize_sources(images::Garray, catalog::Garray, tasks::Garray,
                         optimize_source(item, images, catalog, catalog_offset,
                                         rcf_to_index, cache, cache_lock, g_lock,
                                         stagedir, times)
-                    catch exc 
+                    catch exc
                         ntputs(nodeid, tid, "$exc running task $item on try $tries")
+                        if isa(exc, ReadOnlyMemoryError)
+                            est = catch_stacktrace()
+                            for st in est
+                                ntputs(nodeid, tid, "  $st")
+                            end
+                        end
                         tries = tries + 1 
                         continue
                     end 

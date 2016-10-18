@@ -22,7 +22,7 @@ function HessianSubmatrices(NumType::DataType, i::Int)
 
     u_u = zeros(NumType, 2, 2)
     shape_shape = zeros(NumType, shape_p, shape_p)
-    HessianSubmatrices{NumType}(u_u, shape_shape)
+    HessianSubmatrices(u_u, shape_shape)
 end
 
 
@@ -102,10 +102,8 @@ function ElboIntermediateVariables(NumType::DataType,
     E_G2_s = zero_sensitive_float(CanonicalParams, NumType, 1)
     var_G_s = zero_sensitive_float(CanonicalParams, NumType, 1)
 
-    E_G_s_hsub_vec =
-        HessianSubmatrices{NumType}[ HessianSubmatrices(NumType, i) for i=1:Ia ]
-    E_G2_s_hsub_vec =
-        HessianSubmatrices{NumType}[ HessianSubmatrices(NumType, i) for i=1:Ia ]
+    E_G_s_hsub_vec = [HessianSubmatrices(NumType, i) for i=1:Ia]
+    E_G2_s_hsub_vec = [HessianSubmatrices(NumType, i) for i=1:Ia]
 
     E_G = zero_sensitive_float(CanonicalParams, NumType, num_active_sources)
     var_G = zero_sensitive_float(CanonicalParams, NumType, num_active_sources)

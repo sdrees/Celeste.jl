@@ -85,7 +85,7 @@ function get_psf_width(psf::Array{PsfComponent}; width_scale=1.0)
 
     # Return the twice the sd of the most spread direction, scaled by the total
     # mass in the PSF.
-    width_scale * sqrt(eigvals(cov_est)[end]) * alpha_norm
+    width_scale * sqrt(eigvals(Matrix(cov_est))[end]) * alpha_norm
 end
 
 

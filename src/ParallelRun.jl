@@ -338,7 +338,7 @@ function one_node_infer(
 
     # If there are no objects of interest, return early.
     if length(target_sources) == 0
-        return Dict{Int, Dict}()
+        return Vector{InferResult}()
     end
 
     reserve_thread[] && thread_fun(reserve_thread)
