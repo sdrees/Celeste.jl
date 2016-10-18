@@ -486,7 +486,7 @@ function optimize_source(s::Int64, images::Garray, catalog::Garray,
             imgs, ih, neighbors, ch, time()
         end
         push!(cache, rcf => (cached_imgs, ih, cached_cat, ch, time()))
-        if length(cache) > 40
+        if length(cache) > 25
             clean_cache(cache)
         end
         unlock(cache_lock)
@@ -547,7 +547,7 @@ function optimize_sources(images::Garray, catalog::Garray, tasks::Garray,
 
     workitems, wih = get(tasks, [startwi], [endwi])
     widx = 1
-    wilock = SpinLock()
+    wi_lock = SpinLock()
 
     function process_tasks()
         tid = threadid()
@@ -562,10 +562,10 @@ function optimize_sources(images::Garray, catalog::Garray, tasks::Garray,
         else
             while true
                 tic()
-                lock(wilock)
+                lock(wi_lock)
                 if endwi == 0
                     ntputs(nodeid, tid, "dtree: out of work")
-                    unlock(wilock)
+                    unlock(wi_lock)
                     times.sched_ovh = times.sched_ovh + toq()
                     break
                 end
@@ -584,12 +584,12 @@ function optimize_sources(images::Garray, catalog::Garray, tasks::Garray,
                         times.ga_get = times.ga_get + toq()
                         widx = 1
                     end
-                    unlock(wilock)
+                    unlock(wi_lock)
                     continue
                 end
                 item = workitems[widx]
                 widx = widx + 1
-                unlock(wilock)
+                unlock(wi_lock)
                 times.sched_ovh = times.sched_ovh + toq()
                 #ntputs(nodeid, tid, "processing source $item")
 
