@@ -537,8 +537,8 @@ function optimize_sources(images::Garray, catalog::Garray, tasks::Garray,
     ttimes = Array(InferTiming, nthreads())
 
     # create Dtree and get the initial allocation
-    dt, isparent = Dtree(num_work_items, 0.4, 0.25,
-                         ceil(Int64, nthreads() / 2))
+    dt, isparent = Dtree(num_work_items, 0.4, nthreads())
+                         #ceil(Int64, nthreads() / 2))
     numwi, (startwi, endwi) = initwork(dt)
     rundt = runtree(dt)
 
