@@ -168,8 +168,7 @@ function state_log_likelihood(is_star::Bool,                # source is star
 
         star_mcs, gal_mcs = load_bvn_mixtures(S, patches,
                               source_params, active_sources, psf_K, n,
-                              calculate_gradient=false,
-                              calculate_hessian=false)
+                              calculate_gradient=false)
 
         p = patches[active_sources[1], n]
         H2, W2 = size(p.active_pixel_bitmap)

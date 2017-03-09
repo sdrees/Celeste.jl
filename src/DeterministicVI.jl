@@ -1,5 +1,5 @@
 """
-Calculate value, gradient, and hessian of the variational ELBO.
+Calculate value and gradient of the variational ELBO.
 """
 module DeterministicVI
 

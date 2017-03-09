@@ -101,132 +101,8 @@ function calculate_source_pixel_brightness!{NumType <: Number}(
                 E_G2_s_d[p0_bright[p0_bright_ind], 1] +=
                     a_i * (fsm_i_v^2) * sb_E_ll_a_b_i_d[p0_bright_ind, 1]
             end
-
-            if elbo_vars.elbo.has_hessian
-                ######################
-                # Hessians.
-
-                # Data structures to accumulate certain submatrices of the Hessian.
-                E_G_s_hsub = elbo_vars.E_G_s_hsub_vec[i]
-                E_G2_s_hsub = elbo_vars.E_G2_s_hsub_vec[i]
-
-                # The (a, a) block of the hessian is zero.
-
-                # The (bright, bright) block:
-                for p0_ind1 in 1:length(p0_bright), p0_ind2 in 1:length(p0_bright)
-                    # TODO: time consuming **************
-                    E_G_s_h[p0_bright[p0_ind1], p0_bright[p0_ind2]] =
-                        a_i * sb_E_l_a_b_i.h[p0_ind1, p0_ind2] * fsm_i_v
-                    E_G2_s_h[p0_bright[p0_ind1], p0_bright[p0_ind2]] =
-                        (fsm_i_v^2) * a_i * sb_E_ll_a_b_i.h[p0_ind1, p0_ind2]
-                end
-
-                # The (shape, shape) block:
-                p1, p2 = size(E_G_s_hsub.shape_shape)
-                for ind1 = 1:p1, ind2 = 1:p2
-                    E_G_s_hsub.shape_shape[ind1, ind2] =
-                        a_i * sb_E_l_a_b_i_v * fsm_i.h[ind1, ind2]
-                    E_G2_s_hsub.shape_shape[ind1, ind2] =
-                        2 * a_i * sb_E_ll_a_b_i_v * (
-                            fsm_i_v * fsm_i.h[ind1, ind2] +
-                            fsm_i_d[ind1, 1] * fsm_i_d[ind2, 1])
-                end
-
-                # The u_u submatrix of this assignment will be overwritten after
-                # the loop.
-                for p0_ind1 in 1:length(p0_shape), p0_ind2 in 1:length(p0_shape)
-                    E_G_s_h[p0_shape[p0_ind1], p0_shape[p0_ind2]] =
-                        a_i * sb_E_l_a_b_i_v * fsm_i.h[p0_ind1, p0_ind2]
-                    E_G2_s_h[p0_shape[p0_ind1], p0_shape[p0_ind2]] =
-                        E_G2_s_hsub.shape_shape[p0_ind1, p0_ind2]
-                end
-
-                # Since the u_u submatrix is not disjoint between different i, accumulate
-                # it separate and add it at the end.
-                for u_ind1 = 1:2, u_ind2 = 1:2
-                    E_G_s_hsub.u_u[u_ind1, u_ind2] =
-                        E_G_s_hsub.shape_shape[u_ind[u_ind1], u_ind[u_ind2]]
-                    E_G2_s_hsub.u_u[u_ind1, u_ind2] =
-                        E_G2_s_hsub.shape_shape[u_ind[u_ind1], u_ind[u_ind2]]
-                end
-
-                # All other terms are disjoint between different i and don't involve
-                # addition, so we can just assign their values (which is efficient in
-                # native julia).
-
-                # The (a, bright) blocks:
-                for p0_ind in 1:length(p0_bright)
-
-                    E_G_s_h[p0_bright[p0_ind], ids.a[i]] =
-                        fsm_i_v * sb_E_l_a_b_i_d[p0_ind, 1]
-                    E_G2_s_h[p0_bright[p0_ind], ids.a[i]] =
-                        (fsm_i_v ^ 2) * sb_E_ll_a_b_i_d[p0_ind, 1]
-                    E_G_s_h[ids.a[i], p0_bright[p0_ind]] =
-                        E_G_s_h[p0_bright[p0_ind], ids.a[i]]
-                    E_G2_s_h[ids.a[i], p0_bright[p0_ind]] =
-                        E_G2_s_h[p0_bright[p0_ind], ids.a[i]]
-                end
-
-                # The (a, shape) blocks.
-                for p0_ind in 1:length(p0_shape)
-                    E_G_s_h[p0_shape[p0_ind], ids.a[i]] =
-                        sb_E_l_a_b_i_v * fsm_i_d[p0_ind, 1]
-                    E_G2_s_h[p0_shape[p0_ind], ids.a[i]] =
-                        sb_E_ll_a_b_i_v * 2 * fsm_i_v * fsm_i_d[p0_ind, 1]
-                    E_G_s_h[ids.a[i], p0_shape[p0_ind]] =
-                        E_G_s_h[p0_shape[p0_ind], ids.a[i]]
-                    E_G2_s_h[ids.a[i], p0_shape[p0_ind]] =
-                        E_G2_s_h[p0_shape[p0_ind], ids.a[i]]
-                end
-
-                for ind_b in 1:length(p0_bright), ind_s in 1:length(p0_shape)
-                    E_G_s_h[p0_bright[ind_b], p0_shape[ind_s]] =
-                        a_i * sb_E_l_a_b_i_d[ind_b, 1] * fsm_i_d[ind_s, 1]
-                    E_G2_s_h[p0_bright[ind_b], p0_shape[ind_s]] =
-                        2 * a_i * sb_E_ll_a_b_i_d[ind_b, 1] * fsm_i_v * fsm_i_d[ind_s]
-
-                    E_G_s_h[p0_shape[ind_s], p0_bright[ind_b]] =
-                        E_G_s_h[p0_bright[ind_b], p0_shape[ind_s]]
-                    E_G2_s_h[p0_shape[ind_s], p0_bright[ind_b]] =
-                        E_G2_s_h[p0_bright[ind_b], p0_shape[ind_s]]
-                end
-            end # if calculate hessian
         end # if calculate derivatives
     end # i loop
-
-    if elbo_vars.elbo.has_hessian
-        # Accumulate the u Hessian. u is the only parameter that is shared between
-        # different values of i.
-
-        # This is
-        # for i = 1:Ia
-        #     E_G_u_u_hess += elbo_vars.E_G_s_hsub_vec[i].u_u
-        #     E_G2_u_u_hess += elbo_vars.E_G2_s_hsub_vec[i].u_u
-        # end
-        # For each value in 1:Ia, written this way for speed.
-
-        if star_only
-            for u_ind1 = 1:2, u_ind2 = 1:2
-                elbo_vars.E_G_s.h[ids.u[u_ind1], ids.u[u_ind2]] =
-                    elbo_vars.E_G_s_hsub_vec[1].u_u[u_ind1, u_ind2]
-
-                elbo_vars.E_G2_s.h[ids.u[u_ind1], ids.u[u_ind2]] =
-                    elbo_vars.E_G2_s_hsub_vec[1].u_u[u_ind1, u_ind2]
-            end
-        else
-            @assert Ia == 2
-
-            for u_ind1 = 1:2, u_ind2 = 1:2
-                elbo_vars.E_G_s.h[ids.u[u_ind1], ids.u[u_ind2]] =
-                    elbo_vars.E_G_s_hsub_vec[1].u_u[u_ind1, u_ind2] +
-                    elbo_vars.E_G_s_hsub_vec[2].u_u[u_ind1, u_ind2]
-
-                elbo_vars.E_G2_s.h[ids.u[u_ind1], ids.u[u_ind2]] =
-                    elbo_vars.E_G2_s_hsub_vec[1].u_u[u_ind1, u_ind2] +
-                    elbo_vars.E_G2_s_hsub_vec[2].u_u[u_ind1, u_ind2]
-            end
-        end
-    end
 
     calculate_var_G_s!(ea, vp, elbo_vars, is_active_source)
 end
@@ -266,20 +142,6 @@ function calculate_var_G_s!{NumType <: Number}(
 
         @inbounds for ind1 = 1:length(var_G_s_d)
             var_G_s_d[ind1] = E_G2_s_d[ind1] - 2 * E_G_s_v * E_G_s_d[ind1]
-        end
-
-        if elbo_vars.elbo.has_hessian
-            var_G_s_h = elbo_vars.var_G_s.h
-            E_G2_s_h = elbo_vars.E_G2_s.h
-            E_G_s_h = elbo_vars.E_G_s.h
-            p1, p2 = size(var_G_s_h)
-            @inbounds for ind2 = 1:p2, ind1 = 1:ind2
-                var_G_s_h[ind1, ind2] =
-                    E_G2_s_h[ind1, ind2] - 2 * (
-                        E_G_s_v * E_G_s_h[ind1, ind2] +
-                        E_G_s_d[ind1, 1] * E_G_s_d[ind2, 1])
-                var_G_s_h[ind2, ind1] = var_G_s_h[ind1, ind2]
-            end
         end
     end
 end
@@ -350,13 +212,6 @@ function add_elbo_log_term!{NumType <: Number}(
             elbo_vars.combine_grad[1] = -0.5 / (E_G_v ^ 2)
             elbo_vars.combine_grad[2] = 1 / E_G_v + var_G_v / (E_G_v ^ 3)
 
-            if elbo_vars.elbo.has_hessian
-                elbo_vars.combine_hess[1, 1] = 0.0
-                elbo_vars.combine_hess[1, 2] = elbo_vars.combine_hess[2, 1] = 1 / E_G_v^3
-                elbo_vars.combine_hess[2, 2] =
-                    -(1 / E_G_v ^ 2 + 3    * var_G_v / (E_G_v ^ 4))
-            end
-
             # Calculate the log term.
             combine_sfs!(
                 var_G, E_G, elbo_vars.elbo_log_term,
@@ -368,14 +223,6 @@ function add_elbo_log_term!{NumType <: Number}(
 
             for ind in 1:length(elbo_d)
                 elbo_d[ind] += x_nbm * elbo_vars_elbo_log_term_d[ind]
-            end
-
-            if elbo_vars.elbo.has_hessian
-                elbo_h = elbo.h
-                elbo_vars_elbo_log_term_h = elbo_vars.elbo_log_term.h
-                for ind in 1:length(elbo_h)
-                    elbo_h[ind] += x_nbm * elbo_vars_elbo_log_term_h[ind]
-                end
             end
         end
     end
@@ -467,8 +314,7 @@ function elbo_likelihood{NumType <: Number}(
         star_mcs, gal_mcs = Model.load_bvn_mixtures(ea.S, ea.patches,
                                     vp, ea.active_sources,
                                     ea.psf_K, n,
-                                    calculate_gradient=elbo_vars.elbo.has_gradient,
-                                    calculate_hessian=elbo_vars.elbo.has_hessian)
+                                    calculate_gradient=elbo_vars.elbo.has_gradient)
 
         # if there's only one active source, we know each pixel we visit
         # hasn't been visited before, so no need to allocate memory.
@@ -531,9 +377,9 @@ function elbo{NumType <: Number}(
                  ea::ElboArgs,
                  vp::VariationalParams{NumType},
                  elbo_vars::ElboIntermediateVariables{NumType} =
-                    ElboIntermediateVariables(NumType, ea.S, ea.Sa, true, false),
+                    ElboIntermediateVariables(NumType, ea.S, ea.Sa, true),
                  kl_source = SensitiveFloat{NumType}(length(CanonicalParams), 1,
-                                               elbo_vars.elbo.has_gradient, false),
+                                               elbo_vars.elbo.has_gradient),
                  kl_helper = KLDivergence.get_kl_helper(NumType))
     @assert(all([all(isfinite, vs) for vs in vp]), "vp contains NaNs or Infs")
     ret = elbo_likelihood(ea, vp, elbo_vars)

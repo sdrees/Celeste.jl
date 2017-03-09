@@ -64,25 +64,55 @@ function Config{T}(ea::ElboArgs,
     n_free_params = length(free_params[1])
     n_bound_params = length(bound_params[1])
     jacobian_bundle = TransformJacobianBundle(bound_params, free_params)
-    objective_elbo_vars = ElboIntermediateVariables(T, ea.S, n_active_sources,
-                                                    false, false)
-    gradient_elbo_vars = ElboIntermediateVariables(T, ea.S, n_active_sources,
-                                                   true, false)
-    sf_free = SensitiveFloat{T}(n_free_params, n_bound_params, true, false)
+    objective_elbo_vars = ElboIntermediateVariables(T, ea.S, n_active_sources, false)
+    gradient_elbo_vars = ElboIntermediateVariables(T, ea.S, n_active_sources, true)
+    sf_free = SensitiveFloat{T}(n_free_params, n_bound_params, true)
 
     dual_vp = Vector{Dual{1,T}}[similar(src, Dual{1,T}) for src in vp]
     dual_bound_params = dual_vp[ea.active_sources]
     dual_free_params = Vector{Dual{1,T}}[similar(x, Dual{1,T}) for x in free_params]
     dual_jacobian_bundle = TransformJacobianBundle(dual_bound_params, dual_free_params)
-    hessvec_elbo_vars = ElboIntermediateVariables(Dual{1,T}, ea.S, n_active_sources,
-                                                  true, false)
-    dual_sf_free = SensitiveFloat{Dual{1,T}}(n_free_params, n_bound_params, true, false)
+    hessvec_elbo_vars = ElboIntermediateVariables(Dual{1,T}, ea.S, n_active_sources, true)
+    dual_sf_free = SensitiveFloat{Dual{1,T}}(n_free_params, n_bound_params, true)
 
     return Config(bound_params, free_params, jacobian_bundle,
                   objective_elbo_vars, gradient_elbo_vars, sf_free,
                   dual_vp, dual_bound_params, dual_free_params,
                   dual_jacobian_bundle, hessvec_elbo_vars, dual_sf_free,
                   constraints, optim_options, trust_region)
+end
+
+function elbo_constraints{T}(bound::VariationalParams{T},
+                             loc_width::Real = 1.0e-4,
+                             loc_scale::Real = 1.0)
+    n_sources = length(bound)
+    boxes = Vector{Vector{ParameterConstraint{BoxConstraint}}}(n_sources)
+    simplexes = Vector{Vector{ParameterConstraint{SimplexConstraint}}}(n_sources)
+    for src in 1:n_sources
+        bound_src = bound[src]
+        u1_id, u2_id = ids.u[1], ids.u[2]
+        u1, u2 = bound_src[u1_i], bound_src[u1_2]
+        boxes[src] = [
+            ParameterConstraint(BoxConstraint(u1 - loc_width, u1 + loc_width, loc_scale), u1_id)
+            ParameterConstraint(BoxConstraint(u2 - loc_width, u2 + loc_width, loc_scale), u2_id)
+            ParameterConstraint(BoxConstraint(1e-2, 0.99, 1.0), ids.e_dev),
+            ParameterConstraint(BoxConstraint(1e-2, 0.99, 1.0), ids.e_axis),
+            ParameterConstraint(BoxConstraint(-10.0, 10.0, 1.0), ids.e_angle),
+            ParameterConstraint(BoxConstraint(0.10, 70.0, 1.0), ids.e_scale),
+            ParameterConstraint(BoxConstraint(-1.0, 10.0, 1.0), ids.r1),
+            ParameterConstraint(BoxConstraint(1e-4, 0.10, 1.0), ids.r2),
+            ParameterConstraint(BoxConstraint(-10.0, 10.0, 1.0), ids.c1[:, 1]),
+            ParameterConstraint(BoxConstraint(-10.0, 10.0, 1.0), ids.c1[:, 2]),
+            ParameterConstraint(BoxConstraint(1e-4, 1.0, 1.0), ids.c2[:, 1]),
+            ParameterConstraint(BoxConstraint(1e-4, 1.0, 1.0), ids.c2[:, 2])
+        ]
+        simplexes[src] = [
+            ParameterConstraint(SimplexConstraint(0.005, 1.0, 2), ids.a),
+            ParameterConstraint(SimplexConstraint(0.01/D, 1.0, D), ids.k[:, 1]),
+            ParameterConstraint(SimplexConstraint(0.01/D, 1.0, D), ids.k[:, 2])
+        ]
+    end
+    return ConstraintBatch(boxes, simplexes)
 end
 
 function custom_optim_options(; xtol_abs = 1e-7, ftol_rel = 1e-6, max_iters = 50)

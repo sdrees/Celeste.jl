@@ -166,32 +166,19 @@ using ReverseDiff: TrackedArray, TrackedReal, CompiledTape, GradientTape
 
 immutable KLHelper{N,T}
     gradient_tape::CompiledTape{:kl_gradient,KLGradientTape{T}}
-    nested_gradient_tape::CompiledTape{:kl_nested_gradient,KLGradientTape{Dual{N,T}}}
-    dual_buffer::Vector{Dual{N,T}}
-    jacobian_config::JacobianConfig{N,T,Vector{Dual{N,T}}}
 end
 
 const PARAM_LENGTH = length(CanonicalParams)
 
 function KLHelper{N,T}(::Type{Dual{N,T}})
-    dual_buffer = zeros(Dual{N,T}, PARAM_LENGTH)
-    jacobian_config = JacobianConfig{N}(rand(T, PARAM_LENGTH))
     gradient_tape = CompiledTape{:kl_gradient}(GradientTape(subtract_kl, rand(T, PARAM_LENGTH)))
-    nested_gradient_tape = CompiledTape{:kl_nested_gradient}(GradientTape(subtract_kl, rand(Dual{N,T}, PARAM_LENGTH)))
     ReverseDiff.compile(gradient_tape)
-    ReverseDiff.compile(nested_gradient_tape)
-    return KLHelper{N,T}(gradient_tape, nested_gradient_tape, dual_buffer, jacobian_config)
+    return KLHelper{N,T}(gradient_tape)
 end
 
 function kl_gradient!(out, x, helper::KLHelper)
     return ReverseDiff.gradient!(out, helper.gradient_tape, x)
 end
-
-function kl_hessian!(out, x, helper::KLHelper)
-    f = x -> ReverseDiff.gradient!(helper.dual_buffer, helper.nested_gradient_tape, x)
-    return ForwardDiff.jacobian!(out, f, x, helper.jacobian_config)
-end
-
 
 ###############
 # Entry Point #
@@ -204,9 +191,6 @@ function subtract_kl_source!(kl_source::SensitiveFloat, result::DiffBase.DiffRes
         kl_source.v[] = DiffBase.value(result)
     else
         kl_source.v[] = subtract_kl(vs)
-    end
-    if kl_source.has_hessian
-        kl_hessian!(kl_source.h, vs, helper)
     end
     return kl_source
 end

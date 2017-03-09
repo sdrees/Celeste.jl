@@ -2,7 +2,6 @@ module ConstraintTransforms
 
 using ..Model
 using ..SensitiveFloats
-using ..DeterministicVI: VariationalParams
 using Compat
 
 ####################
@@ -377,15 +376,15 @@ if length(CanonicalParams) % DEFAULT_CHUNK != 0
 end
 
 function TransformJacobianBundle{T<:Real,N}(output::Vector{T}, input::Vector{T},
-                                            ::Type{Val{N}} = Val{DEFAULT_CHUNK})
+                                            ::Val{N} = Val{DEFAULT_CHUNK})
     jacobian = zeros(T, length(output), length(input))
     cfg = JacobianConfig{N}(output, input)
     return TransformJacobianBundle(jacobian, similar(output), cfg)
 end
 
 function TransformJacobianBundle{T<:Real,N}(output::VariationalParams{T},
-                                         input::VariationalParams{T},
-                                         ::Type{Val{N}} = Val{DEFAULT_CHUNK})
+                                            input::VariationalParams{T},
+                                            ::Val{N} = Val{DEFAULT_CHUNK})
     @assert length(output) == length(input)
     @assert all(length(src) == length(output[1]) for src in output)
     @assert all(length(src) == length(input[1]) for src in input)

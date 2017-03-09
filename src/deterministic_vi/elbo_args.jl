@@ -42,19 +42,12 @@ type ElboIntermediateVariables{NumType <: Number}
     E_G2_s::SensitiveFloat{NumType}
     var_G_s::SensitiveFloat{NumType}
 
-    # Subsets of the Hessian of E_G_s and E_G2_s that allow us to use BLAS
-    # functions to accumulate Hessian terms. There is one submatrix for
-    # each celestial object type in 1:Ia
-    E_G_s_hsub_vec::Vector{HessianSubmatrices{NumType}}
-    E_G2_s_hsub_vec::Vector{HessianSubmatrices{NumType}}
-
     # Expected pixel intensity and variance for a pixel from all sources.
     E_G::SensitiveFloat{NumType}
     var_G::SensitiveFloat{NumType}
 
     # Pre-allocated memory for the gradient and Hessian of combine functions.
     combine_grad::Vector{NumType}
-    combine_hess::Matrix{NumType}
 
     # A placeholder for the log term in the ELBO.
     elbo_log_term::SensitiveFloat{NumType}
@@ -76,8 +69,7 @@ Args:
 function ElboIntermediateVariables(NumType::DataType,
                                    S::Int,
                                    num_active_sources::Int,
-                                   calculate_gradient::Bool=true,
-                                   calculate_hessian::Bool=true)
+                                   calculate_gradient::Bool=true)
     @assert NumType <: Number
 
     bvn_derivs = BivariateNormalDerivatives{NumType}()
@@ -85,22 +77,17 @@ function ElboIntermediateVariables(NumType::DataType,
     # fs0m and fs1m accumulate contributions from all bvn components
     # for a given source.
     fs0m = SensitiveFloat{NumType}(length(StarPosParams), 1,
-                                calculate_gradient, calculate_hessian)
+                                calculate_gradient)
     fs1m = SensitiveFloat{NumType}(length(GalaxyPosParams), 1,
-                                calculate_gradient, calculate_hessian)
+                                calculate_gradient)
 
     E_G_s = SensitiveFloat{NumType}(length(CanonicalParams), 1,
-                                    calculate_gradient, calculate_hessian)
+                                    calculate_gradient)
     E_G2_s = SensitiveFloat(E_G_s)
     var_G_s = SensitiveFloat(E_G_s)
 
-    E_G_s_hsub_vec =
-        HessianSubmatrices{NumType}[ HessianSubmatrices(NumType, i) for i=1:Ia ]
-    E_G2_s_hsub_vec =
-        HessianSubmatrices{NumType}[ HessianSubmatrices(NumType, i) for i=1:Ia ]
-
     E_G = SensitiveFloat{NumType}(length(CanonicalParams), num_active_sources,
-                                  calculate_gradient, calculate_hessian)
+                                  calculate_gradient)
     var_G = SensitiveFloat(E_G)
 
     combine_grad = zeros(NumType, 2)
