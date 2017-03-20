@@ -1,6 +1,7 @@
 module ParallelRun
 
 using Base.Threads
+using Base.Dates
 
 import FITSIO
 import JLD
@@ -47,7 +48,7 @@ end
 
 
 # ------
-# timed parts of Celeste
+# to time parts of Celeste
 type InferTiming
     query_fids::Float64
     read_photoobj::Float64
@@ -57,11 +58,12 @@ type InferTiming
     opt_srcs::Float64
     num_srcs::Int64
     load_imba::Float64
+    ga_get::Float64
     ga_put::Float64
     write_results::Float64
     wait_done::Float64
 
-    InferTiming() = new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0.0)
+    InferTiming() = new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0.0, 0.0)
 end
 
 function add_timing!(i::InferTiming, j::InferTiming)
@@ -73,6 +75,7 @@ function add_timing!(i::InferTiming, j::InferTiming)
     i.opt_srcs = i.opt_srcs + j.opt_srcs
     i.num_srcs = i.num_srcs + j.num_srcs
     i.load_imba = i.load_imba + j.load_imba
+    i.ga_get = i.ga_get + j.ga_get
     i.ga_put = i.ga_put + j.ga_put
     i.write_results = i.write_results + j.write_results
     i.wait_done = i.wait_done + j.wait_done
@@ -89,13 +92,14 @@ function puts_timing(i::InferTiming)
     Log.message("timing: num_srcs=$(i.num_srcs)")
     Log.message("timing: average opt_srcs=$(i.opt_srcs/i.num_srcs)")
     Log.message("timing: load_imba=$(i.load_imba)")
+    Log.message("timing: ga_get=$(i.ga_get)")
     Log.message("timing: ga_put=$(i.ga_put)")
     Log.message("timing: write_results=$(i.write_results)")
     Log.message("timing: wait_done=$(i.wait_done)")
 end
 
 function time_puts(elapsedtime, bytes, gctime, allocs)
-    s = @sprintf("%10.6f seconds", elapsedtime/1e9)
+    s = @sprintf("timing: total=%10.6f seconds", elapsedtime/1e9)
     if bytes != 0 || allocs != 0
         bytes, mb = Base.prettyprint_getunits(bytes, length(Base._mem_units),
                             Int64(1024))
@@ -125,6 +129,13 @@ function time_puts(elapsedtime, bytes, gctime, allocs)
 end
 
 
+# ------
+# initialization helpers
+
+"""
+Given a list of RCFs, load the catalogs, determine the target sources,
+load the images, and build the neighbor map. Also, return 
+"""
 function infer_init(rcfs::Vector{RunCamcolField},
                     stagedir::String;
                     objid="",
@@ -137,15 +148,15 @@ function infer_init(rcfs::Vector{RunCamcolField},
     catalog = SDSSIO.read_photoobj_files(rcfs, stagedir,
                         duplicate_policy=duplicate_policy)
     timing.read_photoobj += toq()
-    Log.info("$(length(catalog)) primary sources")
 
     # Get indices of entries in the RA/Dec range of interest.
     entry_in_range = entry->((box.ramin < entry.pos[1] < box.ramax) &&
                              (box.decmin < entry.pos[2] < box.decmax))
     target_sources = find(entry_in_range, catalog)
 
-    Log.info("found $(length(target_sources)) target sources in ",
-             "$(box.ramin), $(box.ramax), $(box.decmin), $(box.decmax)")
+    Log.info("$(length(catalog)) primary sources, $(length(target_sources)) ",
+             "target sources in $(box.ramin), $(box.ramax), $(box.decmin), ",
+             "$(box.decmax)")
 
     # Filter any object not specified, if an objid is specified
     if objid != ""
@@ -154,8 +165,8 @@ function infer_init(rcfs::Vector{RunCamcolField},
     end
 
     # Load images and neighbor map for target sources
-    images = Image[]
-    neighbor_map = Vector{Int}[]
+    images = Vector{Image}()
+    neighbor_map = Vector{Vector{Int64}}()
     if length(target_sources) > 0
         # Read in images for all (run, camcol, field).
         try
@@ -174,6 +185,9 @@ function infer_init(rcfs::Vector{RunCamcolField},
     return catalog, target_sources, neighbor_map, images
 end
 
+
+# ------
+# optimization result container
 
 immutable OptimizedSource
     thingid::Int64
@@ -214,24 +228,25 @@ function deserialize(s::Base.AbstractSerializer, t::Type{OptimizedSource})
 end
 
 
+# ------
+# optimization
+
 """
-Optimize the `ts`th element of `sources`.
+Optimize the `ts`th element of `target_sources`.
 """
 function process_source(config::Configs.Config,
                         ts::Int,
-                        target_sources::Vector{Int},
                         catalog::Vector{CatalogEntry},
+                        target_sources::Vector{Int},
                         neighbor_map::Vector{Vector{Int}},
-                        images::Vector{Image};
-                        infer_source_callback=infer_source)
+                        images::Vector{Image})
     s = target_sources[ts]
     entry = catalog[s]
-
     neighbors = catalog[neighbor_map[ts]]
 
     tic()
-    vs_opt = infer_source_callback(config, images, neighbors, entry)
-    Log.message("processed objid $(entry.objid) in $(toq()) secs")
+    vs_opt = infer_source(config, images, neighbors, entry)
+    Log.message("$(entry.objid): $(toq()) secs")
     return OptimizedSource(entry.thing_id,
                            entry.objid,
                            entry.pos[1],
@@ -271,9 +286,8 @@ function one_node_single_infer(config::Configs.Config,
             end
 
             try
-                result = process_source(config, ts, target_sources, catalog, neighbor_map,
-                                        images;
-                                        infer_source_callback=infer_source_callback)
+                result = process_source(config, ts, catalog, target_sources,
+                                neighbor_map, images)
 
                 lock(results_lock)
                 push!(results, result)
@@ -337,7 +351,7 @@ function one_node_infer(rcfs::Vector{RunCamcolField},
                    box=box,
                    primary_initialization=primary_initialization)
 
-    Log.info("Running with $(nthreads()) threads")
+    Log.info("running with $(nthreads()) threads")
 
     # NB: All I/O happens above. The methods below don't touch disk.
     infer_callback(catalog, target_sources, neighbor_map, images)
@@ -382,7 +396,7 @@ end
 
 
 """
-Like `get_overlapping_fields`, but return a Vector of
+Like `get_overlapping_fields_extents()`, but return a Vector of
 (run, camcol, field) triplets.
 """
 function get_overlapping_fields(query::BoundingBox, stagedir::String)
@@ -410,7 +424,8 @@ called from main entry point.
 function infer_box(box::BoundingBox, stagedir::String, outdir::String)
     timing = InferTiming()
 
-    Log.info("processing box $(box.ramin), $(box.ramax), $(box.decmin), $(box.decmax) with $(nthreads()) threads")
+    Log.info("processing box $(box.ramin), $(box.ramax), $(box.decmin), ",
+             "$(box.decmax) with $(nthreads()) threads")
 
     @time begin
         tic()
@@ -425,8 +440,10 @@ function infer_box(box::BoundingBox, stagedir::String, outdir::String)
                        primary_initialization=true,
                        timing=timing)
 
-        #results = one_node_single_infer(catalog, target_sources, neighbor_map, images; timing=timing)
-        results = one_node_joint_infer(catalog, target_sources, neighbor_map, images; timing=timing)
+        #results = one_node_single_infer(catalog, target_sources,
+        #                                neighbor_map, images; timing=timing)
+        results = one_node_joint_infer(catalog, target_sources, neighbor_map,
+                                       images; timing=timing)
 
         tic()
         save_results(outdir, box, results)
