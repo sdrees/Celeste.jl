@@ -54,16 +54,19 @@ type InferTiming
     read_photoobj::Float64
     read_img::Float64
     find_neigh::Float64
+    load_wait::Float64
     init_elbo::Float64
     opt_srcs::Float64
     num_srcs::Int64
+    sched_ovh::Float64
     load_imba::Float64
     ga_get::Float64
     ga_put::Float64
     write_results::Float64
     wait_done::Float64
 
-    InferTiming() = new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    InferTiming() = new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0, 0.0,
+                        0.0, 0.0, 0.0, 0.0)
 end
 
 function add_timing!(i::InferTiming, j::InferTiming)
@@ -71,9 +74,11 @@ function add_timing!(i::InferTiming, j::InferTiming)
     i.read_photoobj = i.read_photoobj + j.read_photoobj
     i.read_img = i.read_img + j.read_img
     i.find_neigh = i.find_neigh + j.find_neigh
+    i.load_wait = i.load_wait + j.load_wait
     i.init_elbo = i.init_elbo + j.init_elbo
     i.opt_srcs = i.opt_srcs + j.opt_srcs
     i.num_srcs = i.num_srcs + j.num_srcs
+    i.sched_ovh = i.sched_ovh + j.sched_ovh
     i.load_imba = i.load_imba + j.load_imba
     i.ga_get = i.ga_get + j.ga_get
     i.ga_put = i.ga_put + j.ga_put
@@ -87,10 +92,12 @@ function puts_timing(i::InferTiming)
     Log.message("timing: read_photoobj=$(i.read_photoobj)")
     Log.message("timing: read_img=$(i.read_img)")
     Log.message("timing: find_neigh=$(i.find_neigh)")
+    Log.message("timing: load_wait=$(i.load_wait)")
     Log.message("timing: init_elbo=$(i.init_elbo)")
     Log.message("timing: opt_srcs=$(i.opt_srcs)")
     Log.message("timing: num_srcs=$(i.num_srcs)")
     Log.message("timing: average opt_srcs=$(i.opt_srcs/i.num_srcs)")
+    Log.message("timing: sched_ovh=$(i.sched_ovh)")
     Log.message("timing: load_imba=$(i.load_imba)")
     Log.message("timing: ga_get=$(i.ga_get)")
     Log.message("timing: ga_put=$(i.ga_put)")
@@ -175,6 +182,7 @@ function infer_init(rcfs::Vector{RunCamcolField},
             timing.read_img += toq()
         catch ex
             Log.exception(ex)
+            empty!(target_sources)
         end
 
         tic()
@@ -246,7 +254,7 @@ function process_source(config::Configs.Config,
 
     tic()
     vs_opt = infer_source(config, images, neighbors, entry)
-    Log.message("$(entry.objid): $(toq()) secs")
+    Log.info("$(entry.objid): $(toq()) secs")
     return OptimizedSource(entry.thing_id,
                            entry.objid,
                            entry.pos[1],

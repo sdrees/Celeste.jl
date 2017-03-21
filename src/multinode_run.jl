@@ -50,6 +50,7 @@ end
 # ----------------
 type BoxInfo
     state::Atomic{Int}
+    threads_done::Atomic{Int}
     box_idx::Int
     nsources::Int
     catalog::Vector{CatalogEntry}
@@ -64,22 +65,18 @@ type BoxInfo
     #cfg_vec::Vector{Config{DEFAULT_CHUNK,Float64}}
     #ts_vp::Dict{Int64,Array{Float64}}
 
-    BoxInfo() = new(Atomic{Int}(BoxDone), 0, 0, [], [], [], [], SpinLock(),
-                    Atomic{Int}(1))
-    #BoxInfo() = new(Atomic{Int}(BoxDone), 0, 0, [], [], [], [], SpinLock(),
-    #                Atomic{Int}(1), [], [], [], [],
+    BoxInfo() = new(Atomic{Int}(BoxDone), Atomic{Int}(0), 0, 0, [], [], [],
+                    [], SpinLock(), Atomic{Int}(1))
+    #BoxInfo() = new(Atomic{Int}(BoxDone), Atomic{Int}(0), 0, 0, [], [], [],
+    #                [], SpinLock(), Atomic{Int}(1), [], [], [], [],
     #                Dict{Int64,Array{Float64}}())
 end
 
 # box states
 const BoxDone = 0::Int
-const BoxLoaded = 1::Int
+const BoxLoading = 1::Int
 const BoxInitializing = 2::Int
 const BoxReady = 3::Int
-
-# enable loading the next bounding box to process, while light sources
-# in the current box are still being processed
-const NumConcurrentBoxes = 3::Int
 
 
 """
@@ -170,7 +167,7 @@ function save_results(all_results::Garray, outdir::String)
     results = access(all_results, lo, hi)
     fname = @sprintf("%s/celeste-multi-rank%d.jld", outdir, grank())
     JLD.save(fname, "results", results)
-    Log.message("saved results to $fname at $(Time(now()))")
+    Log.message("$(Time(now())): saved results to $fname")
 end
 
 
@@ -183,16 +180,19 @@ function load_box(cbox::BoxInfo, mi::MultiInfo, all_boxes::Vector{BoundingBox},
                   stagedir::String, primary_initialization::Bool,
                   timing::InferTiming)
     tid = threadid()
+    tic()
     lock(cbox.lock)
 
     # another thread might have loaded this box already
-    if cbox.state[] != BoxDone
+    if cbox.state[] == BoxReady
         unlock(cbox.lock)
+        timing.load_wait += toq()
         return true
     end
 
     # determine which box to load next
     box_idx = 0
+    tic()
     while true
         lock(mi.lock)
 
@@ -200,6 +200,7 @@ function load_box(cbox::BoxInfo, mi::MultiInfo, all_boxes::Vector{BoundingBox},
         if mi.li == 0
             unlock(mi.lock)
             unlock(cbox.lock)
+            timing.sched_ovh += toq()
             return false
         end
 
@@ -222,8 +223,15 @@ function load_box(cbox::BoxInfo, mi::MultiInfo, all_boxes::Vector{BoundingBox},
             break
         end
     end
+    timing.sched_ovh += toq()
 
     # load box `box_idx`
+    if atomic_cas!(cbox.state, BoxDone, BoxLoading) != BoxDone
+        Log.error("load_box(): box is neither ready nor done; ",
+                  "$(cbox.state[])! forcing load, this might crash...")
+        cbox.state[] = BoxLoading
+    end
+
     @assert box_idx > 0
     box = all_boxes[box_idx]
     cbox.box_idx = box_idx
@@ -246,7 +254,8 @@ function load_box(cbox::BoxInfo, mi::MultiInfo, all_boxes::Vector{BoundingBox},
     # set box information and update state
     cbox.nsources = length(cbox.target_sources)
     cbox.curr_source[] = 1
-    cbox.state[] = BoxLoaded
+    cbox.threads_done[] = 0
+    cbox.state[] = BoxReady
     unlock(cbox.lock)
 
     Log.message("$(Time(now())): loaded box $(box_idx) ($(box.ramin), ",
@@ -293,11 +302,11 @@ function single_infer_boxes(config::Configs.Config,
     # helper for a thread to switch to and load the next box
     function next_cbox()
         curr_cbox = curr_cbox + 1
-        if curr_cbox > NumConcurrentBoxes
+        if curr_cbox > length(conc_boxes)
             curr_cbox = 1
         end
         cbox = conc_boxes[curr_cbox]
-        if cbox.state[] != BoxLoaded
+        if cbox.state[] != BoxReady
             if !load_box(cbox, mi, all_boxes, stagedir,
                         primary_initialization, thread_timing)
                 return false
@@ -316,10 +325,15 @@ function single_infer_boxes(config::Configs.Config,
         # if the current box is done, switch to the next box
         if ts > cbox.nsources
             # mark this box done
-            if cbox.state[] != BoxDone
-                if atomic_cas!(cbox.state, BoxLoaded, BoxDone) == BoxLoaded
+            if atomic_add!(cbox.threads_done, 1) == (mi.nworkers - 1)
+                if atomic_cas!(cbox.state, BoxReady, BoxDone) == BoxReady
                     Log.message("$(Time(now())): completed box $ts_boxidx ",
                                 "($(cbox.nsources) target sources)")
+                else
+                    Log.error("single_infer_boxes(): box should be ready, ",
+                              "but is $(cbox.state[])! trying to proceed, ",
+                              "this might crash...")
+                    cbox.state[] = BoxDone
                 end
             end
 
@@ -352,10 +366,10 @@ function single_infer_boxes(config::Configs.Config,
         end
 
         # (pre)fetch the next box for overlapping loading with processing
-        if (mi.nworkers == 1 && ts == cbox.nsources) ||
-                (mi.nworkers > 1 &&
-                    (ts == cbox.nsources - (mi.nworkers*8) ||
-                    (cbox.nsources <= (mi.nworkers*8) && ts == 1)))
+        if mi.nworkers > 1 &&
+                    (ts == cbox.nsources - (mi.nworkers*32) ||
+                    (cbox.nsources <= (mi.nworkers*32) && ts == 1))
+            atomic_add!(cbox.threads_done, 1)
             if !next_cbox()
                 break
             end
@@ -380,7 +394,7 @@ function init_box(config::Configs.Config, cbox::BoxInfo, nworkers::Int;
 
     # only one thread does the partitioning and pre-allocation
     lock(cbox.lock)
-    if cbox.state[] == BoxLoaded
+    if cbox.state[] == BoxLoading
         cbox.sources_assignment = partition_box(nworkers, cbox.target_sources,
                                         cbox.neighbor_map;
                                         cyclades_partition=cyclades_partition,
@@ -447,13 +461,10 @@ function joint_infer_boxes(config::Configs.Config,
     while true
         # load the next box
         curr_cbox = curr_cbox + 1
-        if curr_cbox > NumConcurrentBoxes
+        if curr_cbox > length(conc_boxes)
             curr_cbox = 1
         end
         cbox = conc_boxes[curr_cbox]
-        if cbox.state[] != BoxDone
-            Log.warn("box state should be done, but is $(cbox.state[])?!")
-        end
         if !load_box(cbox, mi, all_boxes, stagedir;
                      primary_initialization=primary_initialization,
                      timing=thread_timing)
@@ -555,7 +566,7 @@ function multi_node_infer(all_boxes::Vector{BoundingBox},
                           timing=InferTiming())
     rpn = set_affinities()
 
-    Log.one_message("Celeste started at $(Time(now()))")
+    Log.one_message("$(Time(now())): Celeste started")
     Log.one_message("$rpn ranks per node, $(ngranks()) total ranks, ",
                     "$(nthreads()) threads per rank")
 
@@ -566,7 +577,7 @@ function multi_node_infer(all_boxes::Vector{BoundingBox},
     Log.one_message("$nwi boxes, $(length(all_results)) total sources")
 
     # for concurrent box processing
-    conc_boxes = [BoxInfo() for i=1:NumConcurrentBoxes]
+    conc_boxes = [BoxInfo() for i=1:(max(mi.nworkers/2,1))]
 
     # inference configuration
     config = Configs.Config()
@@ -595,7 +606,7 @@ function multi_node_infer(all_boxes::Vector{BoundingBox},
         #                cyclades_partition, batch_size, within_batch_shuffling,
         #                niters))
     end
-    Log.one_message("completed at $(Time(now()))")
+    Log.one_message("$(Time(now())): optimization complete")
 
     show_pixels_processed()
 
@@ -608,15 +619,17 @@ function multi_node_infer(all_boxes::Vector{BoundingBox},
     tic()
     finalize(mi.dt)
     timing.wait_done = toq()
-    Log.one_message("synchronized ranks at $(Time(now()))")
+    Log.one_message("$(Time(now())): ranks synchronized")
 
     # reduce and normalize collected timing information
     for i = 1:nthreads()
         add_timing!(timing, all_threads_timing[i])
     end
+    timing.load_wait /= mi.nworkers
     timing.init_elbo /= mi.nworkers
     timing.opt_srcs /= mi.nworkers
     timing.load_imba /= mi.nworkers
+    timing.ga_get /= mi.nworkers
     timing.ga_put /= mi.nworkers
 end
 
