@@ -6,6 +6,7 @@ module DeterministicVI
 using Base.Threads: threadid, nthreads
 
 import ..Configs
+using ..Optimization
 using ..Model
 import ..Model: BivariateNormalDerivatives, BvnComponent, GalaxyCacheComponent,
                 BvnBundle, GalaxySigmaDerivs, SkyPatch,
@@ -25,6 +26,8 @@ import Base.convert
 
 export ElboArgs, generic_init_source, catalog_init_source, init_sources,
        VariationalParams, elbo, ElboIntermediateVariables
+
+@compat const VariationalParams{T} = Optimization.Representation{T}
 
 function init_thread_pool!(pool::Vector, create)
     if length(pool) != Base.Threads.nthreads()
@@ -110,7 +113,7 @@ include("deterministic_vi/elbo_kl.jl")
 include("deterministic_vi/source_brightness.jl")
 include("deterministic_vi/elbo_objective.jl")
 include("deterministic_vi/ConstraintTransforms.jl")
-include("deterministic_vi/ElboMaximize.jl")
+include("deterministic_vi/elbo_maximization.jl")
 
 
 """

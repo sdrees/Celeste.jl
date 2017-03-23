@@ -1,10 +1,6 @@
-module ConstraintTransforms
-
-using ..Model
-using ..SensitiveFloats
-using ..DeterministicVI: VariationalParams
 using Celeste: Const, @aliasscope
-using Compat
+using ForwardDiff
+using ForwardDiff: Dual, jacobian!, JacobianConfig
 
 ####################
 # Constraint Types #
@@ -189,7 +185,7 @@ function to_bound!{T<:Real}(bound::Vector{T}, free::Vector{T},
     end
 end
 
-function to_bound!{T}(bound::VariationalParams{T}, free::VariationalParams{T},
+function to_bound!{T}(bound::Representation{T}, free::Representation{T},
                       constraints::ConstraintBatch)
     @assert length(free) == length(bound)
     for src in 1:length(free)
@@ -210,7 +206,7 @@ function to_free!{T<:Real}(free::Vector{T}, bound::Vector{T},
     end
 end
 
-function to_free!{T}(free::VariationalParams{T}, bound::VariationalParams{T},
+function to_free!{T}(free::Representation{T}, bound::Representation{T},
                      constraints::ConstraintBatch)
     @assert length(free) == length(bound)
     for src in 1:length(free)
@@ -282,15 +278,15 @@ function enforce!{T<:Real}(bound::Vector{T}, constraints::ConstraintBatch, src::
     end
 end
 
-function enforce!{T}(bound::VariationalParams{T}, constraints::ConstraintBatch)
+function enforce!{T}(bound::Representation{T}, constraints::ConstraintBatch)
     for src in 1:length(bound)
         enforce!(bound[src], constraints, src)
     end
 end
 
-##########################
-# `allocate_free_params` #
-##########################
+##################################
+# `allocate_free_representation` #
+##################################
 
 function free_length(boxes::Vector{ParameterConstraint{BoxConstraint}})
     return sum(length(box.indices) for box in boxes)
@@ -300,12 +296,12 @@ function free_length(simplexes::Vector{ParameterConstraint{SimplexConstraint}})
     return sum(simplex.constraint.n - 1 for simplex in simplexes)
 end
 
-function allocate_free_params{T}(bound::VariationalParams{T}, constraints::ConstraintBatch)
+function allocate_free_representation{T}(bound::Representation{T}, constraints::ConstraintBatch)
     free = similar(bound)
     for src in 1:length(bound)
-        n_simplex_params = free_length(constraints.simplexes[src])
-        n_box_params = free_length(constraints.boxes[src])
-        free[src] = zeros(T, n_simplex_params + n_box_params)
+        n_simplex_representation = free_length(constraints.simplexes[src])
+        n_box_representation = free_length(constraints.boxes[src])
+        free[src] = zeros(T, n_simplex_representation + n_box_representation)
     end
     return free
 end
@@ -313,11 +309,6 @@ end
 ###################
 # Differentiation #
 ###################
-
-using ForwardDiff
-using ForwardDiff: Dual, jacobian!, JacobianConfig
-
-const NUM_ELBO_BOUND_PARAMS = length(CanonicalParams)
 
 @compat const TransformJacobianConfig{M,N,T} = JacobianConfig{N,T,Tuple{Array{Dual{N,T},M},Vector{Dual{N,T}}}}
 
@@ -329,11 +320,8 @@ immutable TransformDerivatives{N,T}
     outer_cfg::TransformJacobianConfig{2,N,T}
 end
 
-# this is a good chunk size because it divides evenly into `length(CanonicalParams)`
-const DEFAULT_CHUNK = 11
-
 function TransformDerivatives{T<:Real,N}(output::Vector{T}, input::Vector{T},
-                                         ::Type{Val{N}} = Val{DEFAULT_CHUNK})
+                                         ::Val{N})
     jacobian = zeros(T, length(output), length(input))
     hessian = zeros(T, length(output), length(input), length(input))
     output_dual = copy!(similar(output, Dual{N,T}), output)
@@ -342,13 +330,13 @@ function TransformDerivatives{T<:Real,N}(output::Vector{T}, input::Vector{T},
     return TransformDerivatives(jacobian, hessian, output_dual, inner_cfg, outer_cfg)
 end
 
-function TransformDerivatives{T<:Real,N}(output::VariationalParams{T},
-                                         input::VariationalParams{T},
-                                         ::Type{Val{N}} = Val{DEFAULT_CHUNK})
+function TransformDerivatives{T<:Real}(output::Representation{T},
+                                       input::Representation{T},
+                                       chunk_size::Val)
     @assert length(output) == length(input)
     @assert all(length(src) == length(output[1]) for src in output)
     @assert all(length(src) == length(input[1]) for src in input)
-    return TransformDerivatives(output[1], input[1], Val{N})
+    return TransformDerivatives(output[1], input[1], chunk_size)
 end
 
 function differentiate!{F,T<:Number}(transform!::F, derivs::TransformDerivatives,
@@ -362,19 +350,19 @@ end
 # Propagate derivatives of `transform!` back from the output-parameterized SensitiveFloat
 # (`sf_output`) to the input-parameterized SensitiveFloat (`sf_input`). Note that the memory
 # for the raw output parameters is supplied via `derivs`, whose constructor is
-# `TransformDerivatives(output_params, input_params)`.
+# `TransformDerivatives(output_representation, input_representation)`.
 function propagate_derivatives!{F,T}(transform!::F,
                                      sf_output::SensitiveFloat,
                                      sf_input::SensitiveFloat,
-                                     input_sources::VariationalParams{T},
+                                     input_sources::Representation{T},
                                      constraints::ConstraintBatch,
                                      derivs::TransformDerivatives)
     sf_input.v[] = sf_output.v[]
     n_sources = length(input_sources)
-    n_input_params = size(sf_input.d, 1)
-    n_output_params = size(sf_output.d, 1)
-    input_hessian = reshape(sf_input.h, n_sources, n_input_params, n_sources, n_input_params)
-    output_hessian = reshape(sf_output.h, n_sources, n_output_params, n_sources, n_output_params)
+    n_input_representation = size(sf_input.d, 1)
+    n_output_representation = size(sf_output.d, 1)
+    input_hessian = reshape(sf_input.h, n_sources, n_input_representation, n_sources, n_input_representation)
+    output_hessian = reshape(sf_output.h, n_sources, n_output_representation, n_sources, n_output_representation)
     # Julia v0.5 erroneously fails to type-infer `src` for some reason, so we type-annotate
     # it explicitly here. It still unnecessarily boxes/unboxes `src` for some of the uses
     # in the body of the loop, but I'm not sure what to do for that.
@@ -416,8 +404,7 @@ end
 # equivalent to `At_mul_B!(view(C, src, :, src, :), A, view(B, src, :, src, :) * A)`
 # this could be further optimized by assuming the symmetry of `view(B, src, :, src, :)`
 function first_quad_form!(C, A, B, src)
-    const m = NUM_ELBO_BOUND_PARAMS
-    @assert m == size(A, 1)
+    m = size(A, 1)
     n = size(A, 2)
     scratch = Array{Float64, 2}(m, m)
     @aliasscope begin
@@ -448,5 +435,3 @@ function symmetrize!(A, c = 0.5)
     end
     return A
 end
-
-end # module

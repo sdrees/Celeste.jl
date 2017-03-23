@@ -14,11 +14,13 @@ include("Configs.jl")
 include("Log.jl")
 
 include("SensitiveFloats.jl")
-
 include("Model.jl")
 include("Infer.jl")
-include("Transform.jl")
-include("PSF.jl")
+
+include("optimization/Optimization.jl")
+
+include("psf/PSF.jl")
+
 include("SDSSIO.jl")
 
 include("MCMC.jl")
