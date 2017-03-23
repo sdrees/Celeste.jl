@@ -3,18 +3,26 @@
 import Celeste.ParallelRun: BoundingBox, infer_boxes
 import Celeste.Log
 
-if length(ARGS) != 2
-    println("""
-        Usage:
-          infer-boxes.jl <boxes_file> <out_dir>
+function run_infer_boxes(args::Vector{String})
+    if length(args) != 2
+        println("""
+            Usage:
+              infer-boxes.jl <boxes_file> <out_dir>
 
-        <boxes_file> format, one line per box:
-        <difficulty>	<#RCFs>	<#sources>	<ramin> <ramax> <decmin> <decmax>
-        """)
-else
+            <boxes_file> format, one line per box:
+            <difficulty>	<#RCFs>	<#sources>	<ramin> <ramax> <decmin> <decmax>
+            """)
+        exit(-1)
+    end
+    if !haskey(ENV, "CELESTE_STAGE_DIR")
+        println("Set CELESTE_STAGE_DIR!")
+        exit(-2)
+    end
+
+    # parse the boxes file
     all_boxes = BoundingBox[]
     box_source_counts = Int64[]
-    boxes_file = ARGS[1]
+    boxes_file = args[1]
     f = open(boxes_file)
     for ln in eachline(f)
         lp = split(ln, '\t')
@@ -34,11 +42,14 @@ else
         push!(all_boxes, bb)
     end
     close(f)
-    outdir = ARGS[2]
     if length(all_boxes) < 1
         println("box file is empty?")
         exit(-1)
     end
-    infer_boxes(all_boxes, box_source_counts, ENV["CELESTE_STAGE_DIR"], outdir)
+
+    # run Celeste
+    infer_boxes(all_boxes, box_source_counts, ENV["CELESTE_STAGE_DIR"], args[2])
 end
+
+run_infer_boxes(ARGS)
 

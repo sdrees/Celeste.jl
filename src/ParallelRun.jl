@@ -161,9 +161,9 @@ function infer_init(rcfs::Vector{RunCamcolField},
                              (box.decmin < entry.pos[2] < box.decmax))
     target_sources = find(entry_in_range, catalog)
 
-    Log.info("$(length(catalog)) primary sources, $(length(target_sources)) ",
-             "target sources in $(box.ramin), $(box.ramax), $(box.decmin), ",
-             "$(box.decmax)")
+    Log.info("$(Time(now())): $(length(catalog)) primary sources, ",
+             "$(length(target_sources)) target sources in $(box.ramin), ",
+             "$(box.ramax), $(box.decmin), $(box.decmax)")
 
     # Filter any object not specified, if an objid is specified
     if objid != ""

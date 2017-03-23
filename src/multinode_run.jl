@@ -149,10 +149,6 @@ function setup_results(all_boxes::Vector{BoundingBox},
     end
     num_sources = source_offsets[num_boxes+1]
 
-    if grank() == 1
-        Log.one_message("$(num_sources) total sources in all boxes")
-    end
-
     results = Garray(OptimizedSource, OptimizedSourceLen, num_sources)
 
     return results, source_offsets
@@ -285,7 +281,7 @@ function single_infer_boxes(config::Configs.Config,
 
     # Dtree parent ranks reserve one thread to drive the tree
     if mi.rundt && tid == nthreads()
-        Log.message("dtree: running tree")
+        Log.message("$(Time(now())): dtree: running tree")
         while runtree(mi.dt)
             Gasp.cpu_pause()
         end
@@ -566,15 +562,14 @@ function multi_node_infer(all_boxes::Vector{BoundingBox},
                           timing=InferTiming())
     rpn = set_affinities()
 
-    Log.one_message("$(Time(now())): Celeste started")
-    Log.one_message("$rpn ranks per node, $(ngranks()) total ranks, ",
-                    "$(nthreads()) threads per rank")
+    Log.one_message("$(Time(now())): Celeste started, $rpn ranks/node, ",
+                    "$(ngranks()) total ranks, $(nthreads()) threads/rank")
 
     # initialize scheduler, set up results global array
     nwi = length(all_boxes)
     mi = setup_multi(nwi)
     all_results, source_offsets = setup_results(all_boxes, box_source_counts)
-    Log.one_message("$nwi boxes, $(length(all_results)) total sources")
+    Log.one_message("$(Time(now())): $nwi boxes, $(length(all_results)) total sources")
 
     # for concurrent box processing
     conc_boxes = [BoxInfo() for i=1:(max(mi.nworkers/2,1))]
