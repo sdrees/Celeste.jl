@@ -163,7 +163,9 @@ function save_results(all_results::Garray, outdir::String)
     results = access(all_results, lo, hi)
     fname = @sprintf("%s/celeste-multi-rank%d.jld", outdir, grank())
     JLD.save(fname, "results", results)
-    Log.message("$(Time(now())): saved results to $fname")
+    if ngranks() <= 512
+        Log.message("$(Time(now())): saved results to $fname")
+    end
 end
 
 
@@ -202,7 +204,7 @@ function load_box(cbox::BoxInfo, mi::MultiInfo, all_boxes::Vector{BoundingBox},
 
         # if we've run out of items, ask for more work
         if mi.ci > mi.li
-            Log.message("dtree: consumed allocation (last was $(mi.li))")
+            #Log.message("dtree: consumed allocation (last was $(mi.li))")
             mi.ni, (mi.ci, mi.li) = getwork(mi.dt)
             unlock(mi.lock)
             if mi.li == 0
@@ -254,10 +256,12 @@ function load_box(cbox::BoxInfo, mi::MultiInfo, all_boxes::Vector{BoundingBox},
     cbox.state[] = BoxReady
     unlock(cbox.lock)
 
-    Log.message("$(Time(now())): loaded box $(box_idx) ($(box.ramin), ",
-                "$(box.ramax), $(box.decmin), $(box.decmax) ",
-                "($(cbox.nsources) target sources)) in ",
-                "$(rcftime + loadtime) secs")
+    if ngranks() <= 512
+        Log.message("$(Time(now())): loaded box $(box_idx) ($(box.ramin), ",
+                    "$(box.ramax), $(box.decmin), $(box.decmax) ",
+                    "($(cbox.nsources) target sources)) in ",
+                    "$(rcftime + loadtime) secs")
+    end
 
     return true
 end
@@ -289,26 +293,54 @@ function single_infer_boxes(config::Configs.Config,
     end
     # all other threads are workers
 
+    mofc = Atomic{Int}(1)
+    mofreq = ceil(Int, ngranks() / 16)
+
     # concurrent box processing setup
     ts = 0
     ts_boxidx = 0
     curr_cbox = 0
     cbox = BoxInfo()
 
-    # helper for a thread to switch to and load the next box
+    # helper for a thread to complete the current box, then switch to
+    # and load the next box
     function next_cbox()
+        Log.info("done with box $curr_cbox, threads done=$(cbox.threads_done[])")
+        tdone = atomic_add!(cbox.threads_done, 1)
+        if tdone >= (mi.nworkers - 1)
+            if tdone > (mi.nworkers - 1)
+                Log.info("completing box $curr_cbox: $(cbox.threads_done[]) ",
+                         "threads done; wrap-around")
+            end
+            if atomic_cas!(cbox.state, BoxReady, BoxDone) == BoxReady
+                if ngranks() <= 512
+                    Log.message("$(Time(now())): completed box $ts_boxidx ",
+                                "($(cbox.nsources) target sources)")
+                else
+                    if atomic_add!(mofc, 1) == mofreq
+                        mofc[] = 1
+                        Log.message("$(Time(now())): completed $mofreq boxes")
+                    end
+                end
+            else
+                if cbox.state[] != BoxDone
+                    Log.warn("completed box state is $(cbox.state[])")
+                end
+            end
+        end
         curr_cbox = curr_cbox + 1
         if curr_cbox > length(conc_boxes)
             curr_cbox = 1
         end
         cbox = conc_boxes[curr_cbox]
-        Log.info("working on box $(cbox.box_idx)")
+        Log.info("switched to box $(curr_cbox), state is $(cbox.state[])")
         if cbox.state[] != BoxReady
             if !load_box(cbox, mi, all_boxes, stagedir,
                         primary_initialization, thread_timing)
                 return false
             end
         end
+        Log.info("box $curr_cbox is #$(cbox.box_idx)")
         return true
     end
     next_cbox()
@@ -321,22 +353,6 @@ function single_infer_boxes(config::Configs.Config,
 
         # if the current box is done, switch to the next box
         if ts > cbox.nsources
-            # mark this box done
-            if atomic_add!(cbox.threads_done, 1) >= (mi.nworkers - 1)
-                if atomic_cas!(cbox.state, BoxReady, BoxDone) == BoxReady
-                    Log.message("$(Time(now())): completed box $ts_boxidx ",
-                                "($(cbox.nsources) target sources)")
-                else
-                    if cbox.state[] != BoxDone
-                        Log.error("single_infer_boxes(): box should be ready ",
-                                  "or done, but is $(cbox.state[])! trying ",
-                                  " to proceed, this might crash...")
-                        cbox.state[] = BoxDone
-                    end
-                end
-            end
-
-            # switch to the next box (other threads may still be working here)
             if !next_cbox()
                 break
             end
@@ -364,11 +380,11 @@ function single_infer_boxes(config::Configs.Config,
             end
         end
 
-        # (pre)fetch the next box for overlapping loading with processing
+        # prefetch the next box to overlap loading with processing
         if mi.nworkers > 1 &&
                     (ts == cbox.nsources - (mi.nworkers*32) ||
                     (cbox.nsources <= (mi.nworkers*32) && ts == 1))
-            atomic_add!(cbox.threads_done, 1)
+            Log.info("trying to prefetch next box")
             if !next_cbox()
                 # out of work, continue working on current box
                 curr_cbox = curr_cbox - 1
@@ -376,6 +392,7 @@ function single_infer_boxes(config::Configs.Config,
                     curr_cbox = length(conc_boxes)
                 end
                 cbox = conc_boxes[curr_cbox]
+                Log.info("returning to work on box $curr_cbox")
             end
         end
     end
