@@ -302,6 +302,7 @@ function single_infer_boxes(config::Configs.Config,
             curr_cbox = 1
         end
         cbox = conc_boxes[curr_cbox]
+        Log.info("working on box $(cbox.box_idx)")
         if cbox.state[] != BoxReady
             if !load_box(cbox, mi, all_boxes, stagedir,
                         primary_initialization, thread_timing)
@@ -321,15 +322,17 @@ function single_infer_boxes(config::Configs.Config,
         # if the current box is done, switch to the next box
         if ts > cbox.nsources
             # mark this box done
-            if atomic_add!(cbox.threads_done, 1) == (mi.nworkers - 1)
+            if atomic_add!(cbox.threads_done, 1) >= (mi.nworkers - 1)
                 if atomic_cas!(cbox.state, BoxReady, BoxDone) == BoxReady
                     Log.message("$(Time(now())): completed box $ts_boxidx ",
                                 "($(cbox.nsources) target sources)")
                 else
-                    Log.error("single_infer_boxes(): box should be ready, ",
-                              "but is $(cbox.state[])! trying to proceed, ",
-                              "this might crash...")
-                    cbox.state[] = BoxDone
+                    if cbox.state[] != BoxDone
+                        Log.error("single_infer_boxes(): box should be ready ",
+                                  "or done, but is $(cbox.state[])! trying ",
+                                  " to proceed, this might crash...")
+                        cbox.state[] = BoxDone
+                    end
                 end
             end
 
@@ -367,7 +370,12 @@ function single_infer_boxes(config::Configs.Config,
                     (cbox.nsources <= (mi.nworkers*32) && ts == 1))
             atomic_add!(cbox.threads_done, 1)
             if !next_cbox()
-                break
+                # out of work, continue working on current box
+                curr_cbox = curr_cbox - 1
+                if curr_cbox < 1
+                    curr_cbox = length(conc_boxes)
+                end
+                cbox = conc_boxes[curr_cbox]
             end
         end
     end
