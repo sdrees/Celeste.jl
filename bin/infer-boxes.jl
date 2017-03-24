@@ -27,8 +27,8 @@ function run_infer_boxes(args::Vector{String})
     for ln in eachline(f)
         lp = split(ln, '\t')
         if length(lp) != 4
-            println("malformed line in box file, skipping remainder")
-            println("> $ln")
+            Log.one_message("ERROR: malformed line in box file, skipping ",
+                            "remainder\n> $ln")
             break
         end
         sc = parse(Int64, lp[3])

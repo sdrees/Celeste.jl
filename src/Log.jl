@@ -41,17 +41,19 @@ function exception(exception::Exception, msg...)
         error(msg...)
     end
     error(exception)
-    error("Stack trace:")
-    stack_trace = catch_stacktrace()
-    if length(stack_trace) > 100
-        stack_trace = vcat(
-            [string(line) for line in stack_trace[1:50]],
-            @sprintf("...(removed %d frames)...", length(stack_trace) - 100),
-            [string(line) for line in stack_trace[(length(stack_trace) - 50):length(stack_trace)]],
-        )
-    end
-    for stack_line in stack_trace
-        error(@sprintf("  %s", stack_line))
+    if !is_production_run
+        error("Stack trace:")
+        stack_trace = catch_stacktrace()
+        if length(stack_trace) > 100
+            stack_trace = vcat(
+                [string(line) for line in stack_trace[1:50]],
+                @sprintf("...(removed %d frames)...", length(stack_trace) - 100),
+                [string(line) for line in stack_trace[(length(stack_trace) - 50):length(stack_trace)]],
+            )
+        end
+        for stack_line in stack_trace
+            error(@sprintf("  %s", stack_line))
+        end
     end
 end
 
