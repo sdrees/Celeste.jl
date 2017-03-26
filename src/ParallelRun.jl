@@ -413,6 +413,58 @@ function get_overlapping_fields(query::BoundingBox, stagedir::String)
 end
 
 
+type FieldExtents
+    all_run::Vector{Int16}
+    all_camcol::Vector{UInt8}
+    all_field::Vector{Int16}
+    all_ramin::Vector{Float64}
+    all_ramax::Vector{Float64}
+    all_decmin::Vector{Float64}
+    all_decmax::Vector{Float64}
+end
+
+
+function load_field_extents(stagedir::String)
+    f = FITSIO.FITS("$stagedir/field_extents.fits")
+
+    hdu = f[2]::FITSIO.TableHDU
+
+    # read in the entire table.
+    all_run = read(hdu, "run")::Vector{Int16}
+    all_camcol = read(hdu, "camcol")::Vector{UInt8}
+    all_field = read(hdu, "field")::Vector{Int16}
+    all_ramin = read(hdu, "ramin")::Vector{Float64}
+    all_ramax = read(hdu, "ramax")::Vector{Float64}
+    all_decmin = read(hdu, "decmin")::Vector{Float64}
+    all_decmax = read(hdu, "decmax")::Vector{Float64}
+
+    close(f)
+
+    return FieldExtents(all_run, all_camcol, all_field, all_ramin,
+                        all_ramax, all_decmin, all_decmax)
+end
+
+
+function get_overlapping_fields(query::BoundingBox, fe::FieldExtents)
+    rcfs = Vector{RunCamcolField}()
+
+    # The ramin, ramax, etc is a bit unintuitive because we're looking
+    # for any overlap.
+    for i in eachindex(fe.all_ramin)
+        if (fe.all_ramax[i] > query.ramin &&
+                fe.all_ramin[i] < query.ramax &&
+                fe.all_decmax[i] > query.decmin &&
+                fe.all_decmin[i] < query.decmax)
+            push!(rcfs, RunCamcolField(fe.all_run[i],
+                                       fe.all_camcol[i],
+                                       fe.all_field[i]))
+        end
+    end
+
+    return rcfs
+end
+
+
 """
 Save provided results to a JLD file.
 """

@@ -50,7 +50,6 @@ end
 # ----------------
 type BoxInfo
     state::Atomic{Int}
-    threads_done::Atomic{Int}
     box_idx::Int
     nsources::Int
     catalog::Vector{CatalogEntry}
@@ -59,16 +58,17 @@ type BoxInfo
     images::Vector{Image}
     lock::SpinLock
     curr_source::Atomic{Int}
+    sources_done::Atomic{Int}
     #sources_assignment::Vector{Vector{Vector{Int64}}}
     #ea_vec::Vector{ElboArgs}
     #vp_vec::Vector{VariationalParams{Float64}}
     #cfg_vec::Vector{Config{DEFAULT_CHUNK,Float64}}
     #ts_vp::Dict{Int64,Array{Float64}}
 
-    BoxInfo() = new(Atomic{Int}(BoxDone), Atomic{Int}(0), 0, 0, [], [], [],
-                    [], SpinLock(), Atomic{Int}(1))
-    #BoxInfo() = new(Atomic{Int}(BoxDone), Atomic{Int}(0), 0, 0, [], [], [],
-    #                [], SpinLock(), Atomic{Int}(1), [], [], [], [],
+    BoxInfo() = new(Atomic{Int}(BoxDone), 0, 0, [], [], [], [], SpinLock(),
+                    Atomic{Int}(1), Atomic{Int}(0))
+    #BoxInfo() = new(Atomic{Int}(BoxDone), 0, 0, [], [], [], [], SpinLock(),
+    #                Atomic{Int}(1), Atomic{Int}(0), [], [], [], [],
     #                Dict{Int64,Array{Float64}}())
 end
 
@@ -163,7 +163,7 @@ function save_results(all_results::Garray, outdir::String)
     results = access(all_results, lo, hi)
     fname = @sprintf("%s/celeste-multi-rank%d.jld", outdir, grank())
     JLD.save(fname, "results", results)
-    if ngranks() <= 512
+    if !is_production_run || ngranks() <= 512
         Log.message("$(Time(now())): saved results to $fname")
     end
 end
@@ -175,8 +175,8 @@ sources, neighbor map, and images. Possibly ask the scheduler for more
 box(es), if needed.
 """
 function load_box(cbox::BoxInfo, mi::MultiInfo, all_boxes::Vector{BoundingBox},
-                  stagedir::String, primary_initialization::Bool,
-                  timing::InferTiming)
+                  field_extents::FieldExtents, stagedir::String,
+                  primary_initialization::Bool, timing::InferTiming)
     tid = threadid()
     tic()
     lock(cbox.lock)
@@ -205,7 +205,10 @@ function load_box(cbox::BoxInfo, mi::MultiInfo, all_boxes::Vector{BoundingBox},
         # if we've run out of items, ask for more work
         if mi.ci > mi.li
             #Log.message("dtree: consumed allocation (last was $(mi.li))")
-            mi.ni, (mi.ci, mi.li) = getwork(mi.dt)
+            mi.ni, (mi.ci, mi.li) = try getwork(mi.dt)
+            catch exc
+                Log.exception(exc)
+            end
             unlock(mi.lock)
             if mi.li == 0
                 Log.message("dtree: out of work")
@@ -230,34 +233,46 @@ function load_box(cbox::BoxInfo, mi::MultiInfo, all_boxes::Vector{BoundingBox},
         cbox.state[] = BoxLoading
     end
 
-    @assert box_idx > 0
     box = all_boxes[box_idx]
     cbox.box_idx = box_idx
 
     # load the RCFs
-    tic()
-    rcfs = get_overlapping_fields(box, stagedir)
-    rcftime = toq()
-    timing.query_fids += rcftime
+    rcfs = []
+    try
+        tic()
+        rcfs = get_overlapping_fields(box, field_extents)
+        rcftime = toq()
+        timing.query_fids += rcftime
+    catch exc
+        Log.exception(exc)
+    end
 
     # load catalog, target sources, neighbor map and images for these RCFs
-    tic()
-    cbox.catalog, cbox.target_sources, cbox.neighbor_map, cbox.images =
-            infer_init(rcfs, stagedir;
-                       box=box,
-                       primary_initialization=primary_initialization,
-                       timing=timing)
-    loadtime = toq()
+    cbox.catalog = []
+    cbox.target_sources = []
+    cbox.neighbor_map = []
+    cbox.images = []
+    try
+        tic()
+        cbox.catalog, cbox.target_sources, cbox.neighbor_map, cbox.images =
+                infer_init(rcfs, stagedir;
+                           box=box,
+                           primary_initialization=primary_initialization,
+                           timing=timing)
+        loadtime = toq()
+    catch exc
+        Log.exception(exc)
+    end
 
     # set box information and update state
     cbox.nsources = length(cbox.target_sources)
     cbox.curr_source[] = 1
-    cbox.threads_done[] = 0
+    cbox.sources_done[] = 0
     cbox.state[] = BoxReady
     unlock(cbox.lock)
 
-    if ngranks() <= 512
-        Log.message("$(Time(now())): loaded box $(box_idx) ($(box.ramin), ",
+    if !is_production_run || ngranks() <= 512
+        Log.message("$(Time(now())): loaded box #$(box_idx) ($(box.ramin), ",
                     "$(box.ramax), $(box.decmin), $(box.decmax) ",
                     "($(cbox.nsources) target sources)) in ",
                     "$(rcftime + loadtime) secs")
@@ -273,6 +288,7 @@ the specified bounding boxes. Used by the driver function.
 """
 function single_infer_boxes(config::Configs.Config,
                             all_boxes::Vector{BoundingBox},
+                            field_extents::FieldExtents,
                             stagedir::String,
                             mi::MultiInfo,
                             all_results::Garray,
@@ -302,45 +318,59 @@ function single_infer_boxes(config::Configs.Config,
     curr_cbox = 0
     cbox = BoxInfo()
 
-    # helper for a thread to complete the current box, then switch to
-    # and load the next box
-    function next_cbox()
-        Log.info("done with box $curr_cbox, threads done=$(cbox.threads_done[])")
-        tdone = atomic_add!(cbox.threads_done, 1)
-        if tdone >= (mi.nworkers - 1)
-            if tdone > (mi.nworkers - 1)
-                Log.info("completing box $curr_cbox: $(cbox.threads_done[]) ",
-                         "threads done; wrap-around")
+    # helper for a thread to complete the current box
+    function done_with_cbox()
+        Log.debug("done with box #$(cbox.box_idx) ($curr_cbox), ",
+                  "$(cbox.sources_done[])/$(cbox.nsources) sources done")
+        if cbox.sources_done[] >= cbox.nsources
+            if cbox.sources_done[] > cbox.nsources
+                Log.warn("box #$(cbox.box_idx) ($curr_cbox): ",
+                         "$(cbox.sources_done[])/$(cbox.nsources) sources ",
+                         "done?")
             end
-            if atomic_cas!(cbox.state, BoxReady, BoxDone) == BoxReady
-                if ngranks() <= 512
-                    Log.message("$(Time(now())): completed box $ts_boxidx ",
-                                "($(cbox.nsources) target sources)")
-                else
-                    if atomic_add!(mofc, 1) == mofreq
-                        mofc[] = 1
-                        Log.message("$(Time(now())): completed $mofreq boxes")
+            if cbox.state[] != BoxDone
+                if atomic_cas!(cbox.state, BoxReady, BoxDone) == BoxReady
+                    if !is_production_run || ngranks() <= 512
+                        Log.message("$(Time(now())): completed box ",
+                                    "#$(cbox.box_idx) ($(cbox.nsources) target ",
+                                    "sources)")
+                    else
+                        if atomic_add!(mofc, 1) == mofreq
+                            mofc[] = 1
+                            Log.message("$(Time(now())): completed $mofreq boxes")
+                        end
                     end
-                end
-            else
-                if cbox.state[] != BoxDone
-                    Log.warn("completed box state is $(cbox.state[])")
+                else
+                    if cbox.state[] != BoxDone
+                        Log.warn("box $curr_cbox state is $(cbox.state[])?")
+                    end
                 end
             end
         end
+    end
+
+    # helper for a thread to switch to and load the next box
+    function next_cbox()
         curr_cbox = curr_cbox + 1
         if curr_cbox > length(conc_boxes)
             curr_cbox = 1
         end
         cbox = conc_boxes[curr_cbox]
-        Log.info("switched to box $(curr_cbox), state is $(cbox.state[])")
-        if cbox.state[] != BoxReady
-            if !load_box(cbox, mi, all_boxes, stagedir,
+        Log.debug("switched to box $curr_cbox, state is $(cbox.state[])")
+        if cbox.state[] == BoxReady
+            if cbox.curr_source[] > cbox.nsources
+                Log.debug("no sources left to process in box #$(cbox.box_idx) ",
+                          "($curr_cbox), $(cbox.sources_done[])/",
+                          "$(cbox.nsources) done")
+                return next_cbox()
+            end
+        else
+            if !load_box(cbox, mi, all_boxes, field_extents, stagedir,
                         primary_initialization, thread_timing)
                 return false
             end
         end
-        Log.info("box $curr_cbox is #$(cbox.box_idx)")
+        Log.debug("box $curr_cbox is #$(cbox.box_idx)")
         return true
     end
     next_cbox()
@@ -353,6 +383,7 @@ function single_infer_boxes(config::Configs.Config,
 
         # if the current box is done, switch to the next box
         if ts > cbox.nsources
+            done_with_cbox()
             if !next_cbox()
                 break
             end
@@ -380,11 +411,14 @@ function single_infer_boxes(config::Configs.Config,
             end
         end
 
+        atomic_add!(cbox.sources_done, 1)
+
         # prefetch the next box to overlap loading with processing
         if mi.nworkers > 1 &&
                     (ts == cbox.nsources - (mi.nworkers*32) ||
                     (cbox.nsources <= (mi.nworkers*32) && ts == 1))
-            Log.info("trying to prefetch next box")
+            Log.debug("trying to prefetch next box")
+            done_with_cbox()
             if !next_cbox()
                 # out of work, continue working on current box
                 curr_cbox = curr_cbox - 1
@@ -392,7 +426,7 @@ function single_infer_boxes(config::Configs.Config,
                     curr_cbox = length(conc_boxes)
                 end
                 cbox = conc_boxes[curr_cbox]
-                Log.info("returning to work on box $curr_cbox")
+                Log.debug("returning to work on box #$(cbox.box_idx)")
             end
         end
     end
@@ -452,6 +486,7 @@ the specified bounding boxes. Used by the driver function.
 """
 function joint_infer_boxes(config::Configs.Config,
                            all_boxes::Vector{BoundingBox},
+                           field_extents::FieldExtents,
                            stagedir::String,
                            mi::MultiInfo,
                            all_results::Garray,
@@ -486,9 +521,8 @@ function joint_infer_boxes(config::Configs.Config,
             curr_cbox = 1
         end
         cbox = conc_boxes[curr_cbox]
-        if !load_box(cbox, mi, all_boxes, stagedir;
-                     primary_initialization=primary_initialization,
-                     timing=thread_timing)
+        if !load_box(cbox, mi, all_boxes, field_extents, stagedir,
+                     primary_initialization, thread_timing)
             break
         end
         init_box(config, cbox, mi.nworkers;
@@ -596,6 +630,9 @@ function multi_node_infer(all_boxes::Vector{BoundingBox},
     all_results, source_offsets = setup_results(all_boxes, box_source_counts)
     Log.one_message("$(Time(now())): $nwi boxes, $(length(all_results)) total sources")
 
+    # load field extents
+    field_extents = load_field_extents(stagedir)
+
     # for concurrent box processing
     conc_boxes = [BoxInfo() for i=1:(max(mi.nworkers/2,1))]
 
@@ -607,21 +644,22 @@ function multi_node_infer(all_boxes::Vector{BoundingBox},
 
     # run the thread function
     if nthreads() == 1
-        single_infer_boxes(config, all_boxes, stagedir, mi, all_results,
-                           source_offsets, conc_boxes, all_threads_timing,
-                           primary_initialization)
-        #joint_infer_boxes(config, all_boxes, stagedir, mi, all_results,
-        #                  source_offsets, conc_boxes, all_threads_timing,
-        #                  primary_initialization, cyclades_partition,
-        #                  batch_size, within_batch_shuffling, niters)
+        single_infer_boxes(config, all_boxes, field_extents, stagedir, mi,
+                           all_results, source_offsets, conc_boxes,
+                           all_threads_timing, primary_initialization)
+        #joint_infer_boxes(config, all_boxes, field_extents, stagedir, mi,
+        #                  all_results, source_offsets, conc_boxes,
+        #                  all_threads_timing, primary_initialization,
+        #                  cyclades_partition, batch_size,
+        #                  within_batch_shuffling, niters)
     else
         ccall(:jl_threading_run, Void, (Any,),
-              Core.svec(single_infer_boxes, config, all_boxes, stagedir, mi,
-                        all_results, source_offsets, conc_boxes,
+              Core.svec(single_infer_boxes, config, all_boxes, field_extents,
+                        stagedir, mi, all_results, source_offsets, conc_boxes,
                         all_threads_timing, primary_initialization))
         #ccall(:jl_threading_run, Void, (Any,),
-        #      Core.svec(joint_infer_boxes, config, all_boxes, stagedir, mi,
-        #                all_results, source_offsets, conc_boxes,
+        #      Core.svec(joint_infer_boxes, config, all_boxes, field_extents,
+        #                stagedir, mi, all_results, source_offsets, conc_boxes,
         #                all_threads_timing, primary_initialization,
         #                cyclades_partition, batch_size, within_batch_shuffling,
         #                niters))
