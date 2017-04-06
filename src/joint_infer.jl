@@ -17,18 +17,20 @@ using ..DeterministicVI.ElboMaximize: Config, maximize!
 # 5 minute threshold
 const box_max_threshold = convert(UInt64, 5*60*1e9)::UInt64
 
-type KillSwitch <: Function
+type BoxKillSwitch <: Function
     started::UInt64
     killed::Bool
 
-    KillSwitch() = new(0, false)
+    BoxKillSwitch() = new(0, false)
 end
 
-function (f::KillSwitch)(x)
+function (f::BoxKillSwitch)(x)
     if f.started == 0
+        # benign race here
         f.started = time_ns()
         Log.debug("kill timer started at $(f.started)")
     elseif (time_ns() - f.started) > box_max_threshold
+        # and here
         f.killed = true
         Log.debug("timer expired, killed")
     end
@@ -403,7 +405,7 @@ function one_node_joint_infer(config::Configs.Config, catalog, target_sources, n
     ea_vec, vp_vec, cfg_vec, target_source_variational_params =
             setup_vecs(n_sources, target_sources, catalog)
 
-    ks = KillSwitch()
+    ks = BoxKillSwitch()
 
     # Initialize elboargs in parallel
     tic()

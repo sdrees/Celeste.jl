@@ -62,9 +62,10 @@ type BoxInfo
     ea_vec::Vector{ElboArgs}
     vp_vec::Vector{VariationalParams{Float64}}
     cfg_vec::Vector{Config{DEFAULT_CHUNK,Float64}}
+    ks::BoxKillSwitch
 
     BoxInfo() = new(Atomic{Int}(BoxDone), 0, [], [], [], [], [], [], [],
-                    Atomic{Int}(1), [], [], [])
+                    Atomic{Int}(1), [], [], [], BoxKillSwitch())
 end
 
 # box states
@@ -278,6 +279,9 @@ function init_box(npartitions::Int, rcf_map::Dict{RunCamcolField,Int32},
     # to hold previously computed variational parameters (if any)
     cache = Dict{Int,Vector{Float64}}()
 
+    # kill switch for this box
+    cbox.ks = BoxKillSwitch()
+
     # initialize elbo args for all sources
     tic()
     for ts = 1:nsources
@@ -297,7 +301,8 @@ function init_box(npartitions::Int, rcf_map::Dict{RunCamcolField,Int32},
                              ts_vp[x] :
                              catalog_init_source(cbox.catalog[x])
                              for x in ids_local]
-        cbox.cfg_vec[ts] = Config(cbox.ea_vec[ts], vp)
+        cbox.cfg_vec[ts] = Config(cbox.ea_vec[ts], vp;
+                                  termination_callback=cbox.ks)
 
         init_source(i) = i == 1 ?
                          generic_init_source(cat_local[i].pos) :
@@ -364,6 +369,11 @@ Put inference results for a box into the global array.
 """
 function store_box(cbox::BoxInfo, rcf_map::Dict{RunCamcolField,Int32},
                    results::Garray, timing::InferTiming)
+    if cbox.ks.killed
+        Log.message("$(Time(now())): abandoned box #$(cbox.box_idx)")
+        return
+    end
+
     tic()
     try
         for ts = 1:length(cbox.target_sources)
@@ -400,8 +410,7 @@ function store_box(cbox::BoxInfo, rcf_map::Dict{RunCamcolField,Int32},
     timing.num_srcs += length(cbox.target_sources)
 
     if length(cbox.target_sources) > 0
-        Log.message("$(Time(now())): completed box #$(cbox.box_idx) ",
-                    "($(length(cbox.target_sources)) target sources)")
+        Log.message("$(Time(now())): completed box #$(cbox.box_idx)")
     end
 end
 
@@ -546,11 +555,20 @@ function joint_infer_boxes(config::Configs.Config,
                                 rethrow()
                             end
                         end
+                        if cbox.ks.killed
+                            break
+                        end
                     end
                 end
                 tic()
                 thread_barrier(mi.bar)
                 timing.load_imba += toq()
+                if cbox.ks.killed
+                    break
+                end
+            end
+            if cbox.ks.killed
+                break
             end
         end
         boxtime = toq()
