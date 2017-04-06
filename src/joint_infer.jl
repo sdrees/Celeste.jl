@@ -14,6 +14,28 @@ using ..DeterministicVI.ConstraintTransforms: ConstraintBatch, DEFAULT_CHUNK
 using ..DeterministicVI.ElboMaximize: Config, maximize!
 
 
+# 5 minute threshold
+const box_max_threshold = convert(UInt64, 5*60*1e9)::UInt64
+
+type KillSwitch <: Function
+    started::UInt64
+    killed::Bool
+
+    KillSwitch() = new(0, false)
+end
+
+function (f::KillSwitch)(x)
+    if f.started == 0
+        f.started = time_ns()
+        Log.debug("kill timer started at $(f.started)")
+    elseif (time_ns() - f.started) > box_max_threshold
+        f.killed = true
+        Log.debug("timer expired, killed")
+    end
+    return f.killed
+end
+
+
 function union_find!(i, components_tree)
     root = i
     while components_tree[i] != i
@@ -381,13 +403,16 @@ function one_node_joint_infer(config::Configs.Config, catalog, target_sources, n
     ea_vec, vp_vec, cfg_vec, target_source_variational_params =
             setup_vecs(n_sources, target_sources, catalog)
 
+    ks = KillSwitch()
+
     # Initialize elboargs in parallel
     tic()
     thread_initialize_sources_assignment::Vector{Vector{Vector{Int64}}} = partition_equally(n_threads, n_sources)
 
     initialize_elboargs_sources!(config, ea_vec, vp_vec, cfg_vec, thread_initialize_sources_assignment,
                                  catalog, target_sources, neighbor_map, images,
-                                 target_source_variational_params)
+                                 target_source_variational_params;
+                                 termination_callback=ks)
     timing.init_elbo = toq()
 
     # Process sources in parallel
@@ -406,14 +431,18 @@ function one_node_joint_infer(config::Configs.Config, catalog, target_sources, n
     # Return add results to vector
     results = OptimizedSource[]
 
-    for i = 1:n_sources
-        entry = catalog[target_sources[i]]
-        result = OptimizedSource(entry.thing_id,
-                                 entry.objid,
-                                 entry.pos[1],
-                                 entry.pos[2],
-                                 vp_vec[i][1])
-        push!(results, result)
+    if ks.killed
+        Log.message("optimization terminated due to timeout")
+    else
+        for i = 1:n_sources
+            entry = catalog[target_sources[i]]
+            result = OptimizedSource(entry.thing_id,
+                                     entry.objid,
+                                     entry.pos[1],
+                                     entry.pos[2],
+                                     vp_vec[i][1])
+            push!(results, result)
+        end
     end
 
     show_pixels_processed()
@@ -445,14 +474,16 @@ end
 function initialize_elboargs_sources!(config::Configs.Config, ea_vec, vp_vec, cfg_vec,
                                       thread_initialize_sources_assignment,
                                       catalog, target_sources, neighbor_map, images,
-                                      target_source_variational_params)
+                                      target_source_variational_params;
+                                      termination_callback=nothing)
     Threads.@threads for i in 1:nthreads()
         try
             for batch in 1:length(thread_initialize_sources_assignment[i])
                 for source_index in thread_initialize_sources_assignment[i][batch]
                     init_elboargs(config, source_index, catalog, target_sources,
                                   neighbor_map, images, ea_vec, vp_vec, cfg_vec,
-                                  target_source_variational_params)
+                                  target_source_variational_params;
+                                  termination_callback=termination_callback)
                 end
             end
         catch ex
@@ -475,7 +506,8 @@ function init_elboargs(config::Configs.Config,
                        ea_vec::Vector{ElboArgs},
                        vp_vec::Vector{VariationalParams{Float64}},
                        cfg_vec::Vector{Config{DEFAULT_CHUNK,Float64}},
-                       ts_vp::Dict{Int64,Array{Float64}})
+                       ts_vp::Dict{Int64,Array{Float64}};
+                       termination_callback=nothing)
     try
         entry_id = target_sources[ts]
         entry = catalog[entry_id]
@@ -496,7 +528,8 @@ function init_elboargs(config::Configs.Config,
 
         ea_vec[ts] = ea
         vp_vec[ts] = vp
-        cfg_vec[ts] = Config(ea, vp)
+        cfg_vec[ts] = Config(ea, vp;
+                termination_callback=termination_callback)
     catch exc
         if is_production_run || nthreads() > 1
             Log.exception(exc)
@@ -547,7 +580,7 @@ function process_sources_dynamic!(images::Vector{Model.Image},
                                   thread_sources_assignment::Vector{Vector{Vector{Int64}}},
                                   n_iters::Int,
                                   within_batch_shuffling::Bool)
-    Log.message("Processing with dynamic connected components load balancing")
+    Log.info("Processing with dynamic connected components load balancing")
 
     n_threads::Int = nthreads()
     n_batches::Int = length(thread_sources_assignment)
@@ -587,6 +620,9 @@ function process_sources_dynamic!(images::Vector{Model.Image},
                         process_sources_kernel!(ea_vec, vp_vec, cfg_vec,
                                                 thread_sources_assignment[batch::Int][cc_index],
                                                 within_batch_shuffling)
+                        if cfg_vec[1].optim_options.callback.killed
+                            break
+                        end
                     end
                     process_sources_elapsed_times[i::Int] = toq()
                 catch exc
@@ -599,6 +635,12 @@ function process_sources_dynamic!(images::Vector{Model.Image},
                                       mean(process_sources_elapsed_times)) /
                                       maximum(process_sources_elapsed_times)
             Log.info("Batch $(batch) avg threads idle: $(round(Int, idle_percent))%")
+            if cfg_vec[1].optim_options.callback.killed
+                break
+            end
+        end
+        if cfg_vec[1].optim_options.callback.killed
+            break
         end
     end
 end
@@ -618,6 +660,9 @@ function process_sources_kernel!(ea_vec::Vector{ElboArgs},
         end
         for i in source_assignment
             maximize!(ea_vec[i], vp_vec[i], cfg_vec[i])
+            if cfg_vec[i].optim_options.callback.killed
+                break
+            end
         end
     catch ex
         if is_production_run || nthreads() > 1
