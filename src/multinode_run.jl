@@ -244,7 +244,9 @@ function load_box(boxes::Vector{BoundingBox},
         tic()
         cbox.catalog, cbox.target_sources, cbox.neighbor_map,
             cbox.images, cbox.source_rcfs, cbox.source_cat_idxs =
-                    infer_init(rcfs, stagedir; box=box, timing=timing)
+                    infer_init(rcfs, stagedir; box=box,
+                               boxed=(true,box_idx),
+                               timing=timing)
         loadtime = toq()
     catch exc
         Log.exception(exc)

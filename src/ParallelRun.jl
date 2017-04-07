@@ -3,7 +3,10 @@ module ParallelRun
 using Base.Threads
 using Base.Dates
 
+import Base.convert
+
 import FITSIO
+import WCS
 import JLD
 
 import ..Configs
@@ -143,6 +146,45 @@ end
 
 
 # ------
+# Image that can be saved to disk
+immutable FlatImage
+    H::Int
+    W::Int
+    pixels::Matrix{Float32}
+    b::Int
+    wcs_header::String
+    psf::Vector{PsfComponent}
+    run_num::Int
+    camcol_num::Int
+    field_num::Int
+    sky::SkyIntensity
+    iota_vec::Array{Float32, 1}
+    raw_psf_comp::RawPSF
+end
+
+function convert(::Type{FlatImage}, img::Image)
+    wcs_header = WCS.to_header(img.wcs)
+    @assert(length(wcs_header) <= 10000)
+    FlatImage(img.H, img.W, img.pixels, img.b,
+              wcs_header, img.psf, img.run_num,
+              img.camcol_num, img.field_num,
+              img.sky, img.iota_vec,
+              img.raw_psf_comp)
+end
+
+function convert(::Type{Image}, img::FlatImage)
+    wcs_array = WCS.from_header(img.wcs_header)
+    @assert(length(wcs_array) == 1)
+    wcs = wcs_array[1]
+    Image(img.H, img.W, img.pixels, img.b,
+          wcs, img.psf, img.run_num,
+          img.camcol_num, img.field_num,
+          img.sky, img.iota_vec,
+          img.raw_psf_comp)
+end
+
+
+# ------
 # initialization helpers
 
 """
@@ -153,6 +195,7 @@ function infer_init(rcfs::Vector{RunCamcolField},
                     stagedir::String;
                     objid="",
                     box=BoundingBox(-1000., 1000., -1000., 1000.),
+                    boxed=(false,0),
                     primary_initialization=true,
                     timing=InferTiming())
     catalog = Vector{CatalogEntry}()
@@ -196,8 +239,17 @@ function infer_init(rcfs::Vector{RunCamcolField},
     if length(target_sources) > 0
         # Read in images for all (run, camcol, field).
         try
+            is_boxed, box_idx = boxed
             tic()
-            images = SDSSIO.load_field_images(rcfs, stagedir)
+            if is_boxed
+                mdt = box_idx % 5
+                fname = "$stagedir/mdt$(mdt)/(box.ramin)-$(box.ramax)-$(box.decmin)-$(box.decmax)_images.jld"
+                d = JLD.load(fname)
+                fimgs = d["box-images"]
+                images = [convert(Image, fimg) for fimg in fimgs]
+            else
+                images = SDSSIO.load_field_images(rcfs, stagedir)
+            end
             timing.read_img += toq()
         catch ex
             Log.exception(ex)
