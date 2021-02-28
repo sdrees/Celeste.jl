@@ -7,6 +7,7 @@ import ForwardDiff
 
 include("aliasscopes.jl")
 include("config.jl")
+include("dataset.jl")
 
 # submodules
 include("Log.jl")
@@ -22,6 +23,7 @@ include("PSF.jl")
 include("SDSSIO.jl")
 include("SEP.jl")
 
+include("detection.jl")
 include("MCMC.jl")
 include("StochasticVI.jl")
 include("DeterministicVI.jl")
@@ -31,10 +33,9 @@ include("Synthetic.jl")
 include("AccuracyBenchmark.jl")
 include("GalsimBenchmark.jl")
 
+include("DECALSIO.jl")
 include("ArgumentParse.jl")
-
-include("settings.jl")
-
+include("main.jl")
 
 import .ParallelRun: BoundingBox, OptimizedSource
 import .SDSSIO: RunCamcolField, CatalogEntry

@@ -11,13 +11,15 @@ import ..Config
 import ..DeterministicVI
 import ..Model
 import ..ParallelRun
-import ..SDSSIO
+using ..SDSSIO
 using ..Coordinates: angular_separation, match_coordinates
 
 const ARCSEC_PER_DEGREE = 3600
 const SDSS_ARCSEC_PER_PIXEL = 0.396
 const SDSS_DATA_DIR = joinpath(Pkg.dir("Celeste"), "test", "data")
 const STRIPE82_RCF = SDSSIO.RunCamcolField(4263, 5, 119)
+const COADD_CATALOG_FITS = joinpath(Pkg.dir("Celeste"), "test", "data", "coadd_for_4263_5_119.fit")
+const GALAXY_ONLY_COLUMNS = [:gal_frac_dev, :gal_axis_ratio, :gal_radius_px, :gal_angle_deg]
 
 struct BenchmarkFitsFileNotFound <: Exception
     filename::String
@@ -83,29 +85,41 @@ function assert_columns_are_present(catalog_df::DataFrame, required_columns::Set
 end
 
 function read_catalog(csv_file::String)
-    @printf("Reading '%s'...\n", csv_file)
     catalog_df = CSV.read(csv_file, rows_for_type_detect=100)
     assert_columns_are_present(catalog_df, CATALOG_COLUMNS)
     catalog_df
 end
 
-function write_catalog(csv_file::String, catalog_df::DataFrame)
+function write_catalog(filename::String, catalog_df::DataFrame;
+                       append_hash=false)
     assert_columns_are_present(catalog_df, CATALOG_COLUMNS)
-    @printf("Writing '%s'...\n", csv_file)
-    CSV.write(csv_file, catalog_df)
+
+    if append_hash
+        # Serialize the data frame into an array of bytes.
+        # (CSV.write(::IO, ...) currently broken, so we use a temp file.
+        tmp = tempname()
+        CSV.write(tmp, catalog_df)
+        data = open(tmp) do f
+            read(f)
+        end
+        rm(tmp)
+
+        # Hash the bytes and add the hash string to the filename.
+        hash_string = hex(hash(data))[1:10]
+        base, extension = splitext(filename)
+        filename = @sprintf("%s_%s%s", base, hash_string, extension)
+
+        # Write out the file
+        open(filename, "w") do f
+            write(f, data)
+        end
+    else
+        CSV.write(filename, catalog_df)
+    end
+
+    return filename
 end
 
-function append_hash_to_file(filename::String)
-    contents_hash = open(filename) do stream
-        hash(read(stream))
-    end
-    hash_string = hex(contents_hash)[1:10]
-    base, extension = splitext(filename)
-    new_filename = @sprintf("%s_%s%s", base, hash_string, extension)
-    @printf("Renaming %s -> %s\n", filename, new_filename)
-    mv(filename, new_filename, remove_destination=true)
-    new_filename
-end
 
 ################################################################################
 # Read various catalogs to a common catalog DF format
@@ -206,7 +220,7 @@ function load_coadd_catalog(fits_filename)
     result[:is_star] = is_star
 
     flux_r = mag_to_flux.(mag_r, 3)
-    result[:flux_r_nmgy] = ifelse.(flux_r .> 0, flux_r, NaN)
+    result[:flux_r_nmgy] = ifelse.(flux_r .> 0, flux_r, missing)
 
     result[:color_ug] = color_from_mags.(mag_u, 1, mag_g, 2)
     result[:color_gr] = color_from_mags.(mag_g, 2, mag_r, 3)
@@ -239,6 +253,12 @@ function load_coadd_catalog(fits_filename)
     bad_rows = [x in BAD_COADD_OBJID for x in result[:, :objid]]
     result = result[.!bad_rows, :]
 
+    # for stars, ensure galaxy-only fields are "missing"
+    for col in GALAXY_ONLY_COLUMNS
+        result[col] = convert(Vector{Union{Missing, Float64}}, result[col])
+        result[result[:is_star], col] = missing
+    end
+
     return result
 end
 
@@ -255,8 +275,8 @@ Load the SDSS photoObj catalog used to initialize celeste, and reformat column
 names to match what the rest of the scoring code expects.
 """
 function load_primary(rcf::SDSSIO.RunCamcolField, stagedir::String)
-    strategy = SDSSIO.PlainFITSStrategy(stagedir)
-    raw_df = object_dict_to_data_frame(SDSSIO.read_photoobj(strategy, rcf))
+    dataset = SDSSDataSet(stagedir)
+    raw_df = object_dict_to_data_frame(SDSSIO.read_photoobj(dataset, rcf))
 
     usedev = raw_df[:frac_dev] .> 0.5  # true=> use dev, false=> use exp
     dev_or_exp(dev_column, exp_column) = ifelse.(usedev, raw_df[dev_column], raw_df[exp_column])
@@ -435,9 +455,17 @@ Draw sources at random from Celeste prior, returning a catalog DF.
 function generate_catalog_from_celeste_prior(num_sources::Int64, seed::Int64)
     srand(seed)
     prior = Model.load_prior()
-    vcat(
+    result = vcat(
         [draw_source_params(prior) for index in 1:num_sources]...
     )
+
+    # for stars, ensure galaxy-only fields are "missing"
+    for col in GALAXY_ONLY_COLUMNS
+        result[col] = convert(Vector{Union{Missing, Float64}}, result[col])
+        result[result[:is_star], col] = missing
+    end
+
+    return result
 end
 
 
@@ -454,14 +482,12 @@ struct FitsImage
 end
 
 function read_fits(filename::String)
-    println("Reading '$filename'...")
     if !isfile(filename)
         throw(BenchmarkFitsFileNotFound(filename))
     end
 
     fits = FITSIO.FITS(filename)
     try
-        println("Found $(length(fits)) extensions.")
         map(fits) do extension
             pixels = read(extension)
             header = FITSIO.read_header(extension)
@@ -773,8 +799,8 @@ ABSOLUTE_ERROR_COLUMNS = vcat(
 )
 
 function degrees_to_diff(a, b)
-    angle_between = abs(a - b) % 180
-    min.(angle_between, 180 - angle_between)
+    angle_between = abs.(a - b) .% 180
+    min.(angle_between, 180 .- angle_between)
 end
 
 
@@ -801,21 +827,21 @@ function get_error_df(truth::DataFrame, predicted::DataFrame)
                             predicted[:dec])
 
     # compare flux in both mags and nMgy for now
-    errors[:flux_r_mag] = abs(
+    errors[:flux_r_mag] = abs.(
         flux_to_mag.(truth[:flux_r_nmgy], 3)
         .- flux_to_mag.(predicted[:flux_r_nmgy], 3)
     )
-    errors[:flux_r_nmgy] = abs(
+    errors[:flux_r_nmgy] = abs.(
         truth[:flux_r_nmgy] .- predicted[:flux_r_nmgy]
     )
     errors[:gal_angle_deg] = degrees_to_diff(truth[:gal_angle_deg], predicted[:gal_angle_deg])
 
     for column_symbol in ABSOLUTE_ERROR_COLUMNS
-        errors[column_symbol] = abs(truth[column_symbol] - predicted[column_symbol])
+        errors[column_symbol] = abs.(truth[column_symbol] .- predicted[column_symbol])
     end
     for color_column in COLOR_COLUMNS
         # to match up with Stripe82Score, which used differences of mags
-        errors[color_column] *= 2.5 / log(10)
+        errors[color_column] .*= 2.5 / log(10)
     end
 
     errors
@@ -911,10 +937,15 @@ function match_catalogs(truth::DataFrame, prediction_dfs::Vector{DataFrame};
     matched = trues(nrow(truth))
     idxs = Vector{Int}[]
     for prediction in prediction_dfs
-        idx, dists = match_coordinates(truth[:ra],
-                                       truth[:dec],
-                                       prediction[:ra],
-                                       prediction[:dec])
+        # remove missings before feeding to match_coordinates
+        @assert sum(ismissing.(truth[:ra])) == 0
+        @assert sum(ismissing.(truth[:dec])) == 0
+        @assert sum(ismissing.(prediction[:ra])) == 0
+        @assert sum(ismissing.(prediction[:dec])) == 0
+        idx, dists = match_coordinates(Vector{Float64}(truth[:ra]),
+                                       Vector{Float64}(truth[:dec]),
+                                       Vector{Float64}(prediction[:ra]),
+                                       Vector{Float64}(prediction[:dec]))
         matched .&= dists .< tol
         push!(idxs, idx)
     end
@@ -998,6 +1029,22 @@ function score_uncertainty(uncertainty_df::DataFrame)
             within_3_sd=mean(abs_error_sds .<= 3),
         )
     end
+end
+
+
+function plot_image(img)
+    xs = img.pixels'
+
+    xs -= 550
+    black = minimum(filter(.!isnan, xs))
+    xs = map((x)->isnan(x) ? black : x, xs)
+    xs = min.(xs, 10_000)
+    xs = log.(xs + 100)
+    #cutoffs = quantile(xs2[:], 0:0.01:1)
+    #xs3 = map(x->findfirst(x .< cutoffs), xs2)
+    xs -= log(black + 100)
+    xs /= log(10_100)
+    return xs
 end
 
 
